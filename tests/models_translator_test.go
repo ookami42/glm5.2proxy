@@ -46,8 +46,8 @@ func TestTranslationKeepsThinkingParametersValidForClientTokenLimit(t *testing.T
 
 	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"}, 64000)
 	thinking := translated["thinking"].(map[string]any)
-	if thinking["budget_tokens"] != 4096 {
-		t.Fatalf("thinking budget must fit inside max_tokens: %+v", translated)
+	if thinking["budget_tokens"] != 32000 || translated["max_tokens"] != float64(40192) {
+		t.Fatalf("upstream max_tokens must include requested output plus thinking budget: %+v", translated)
 	}
 	if _, ok := translated["temperature"]; ok {
 		t.Fatalf("temperature must be omitted while thinking is enabled: %+v", translated)
@@ -57,7 +57,7 @@ func TestTranslationKeepsThinkingParametersValidForClientTokenLimit(t *testing.T
 	}
 }
 
-func TestTranslationDisablesThinkingWhenClientTokenLimitIsTooSmall(t *testing.T) {
+func TestTranslationAddsThinkingBudgetToSmallClientOutputLimit(t *testing.T) {
 	model, _ := models.Resolve("glm-5.2")
 	body := map[string]any{
 		"model":       "glm-5.2",
@@ -67,10 +67,53 @@ func TestTranslationDisablesThinkingWhenClientTokenLimitIsTooSmall(t *testing.T)
 	}
 
 	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"}, 64000)
-	if _, ok := translated["thinking"]; ok {
-		t.Fatalf("thinking must be omitted when max_tokens cannot contain a valid budget: %+v", translated)
+	if translated["thinking"].(map[string]any)["budget_tokens"] != 32000 || translated["max_tokens"] != float64(32512) {
+		t.Fatalf("small client output limit must remain separate from thinking budget: %+v", translated)
 	}
-	if translated["temperature"] != float64(0.2) {
-		t.Fatalf("temperature should remain available without thinking: %+v", translated)
+	if _, ok := translated["temperature"]; ok {
+		t.Fatalf("temperature must remain omitted while thinking is enabled: %+v", translated)
+	}
+}
+
+func TestTranslationCapsCombinedOutputAndThinkingAtProviderLimit(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	body := map[string]any{
+		"model":      "glm-5.2",
+		"max_tokens": float64(64000),
+		"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"}, 64000)
+	if translated["max_tokens"] != float64(64000) || translated["thinking"].(map[string]any)["budget_tokens"] != 32000 {
+		t.Fatalf("combined token budget must respect provider limit: %+v", translated)
+	}
+}
+
+func TestTranslationUsesNativeToolResultsAndGroupsConsecutiveResults(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	body := map[string]any{
+		"model": "glm-5.2",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "inspect files"},
+			map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": "call-one", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"one"}`}},
+				map[string]any{"id": "call-two", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"two"}`}},
+			}},
+			map[string]any{"role": "tool", "tool_call_id": "call-one", "content": "first"},
+			map[string]any{"role": "tool", "tool_call_id": "call-two", "content": "second"},
+		},
+	}
+
+	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{}, 64000)
+	messages := translated["messages"].([]any)
+	if len(messages) != 3 {
+		t.Fatalf("expected grouped user/tool-result messages, got %+v", messages)
+	}
+	assistantBlocks := messages[1].(map[string]any)["content"].([]any)
+	if assistantBlocks[0].(map[string]any)["type"] != "tool_use" || assistantBlocks[1].(map[string]any)["type"] != "tool_use" {
+		t.Fatalf("assistant tool calls were not translated natively: %+v", assistantBlocks)
+	}
+	resultBlocks := messages[2].(map[string]any)["content"].([]any)
+	if len(resultBlocks) != 2 || resultBlocks[0].(map[string]any)["type"] != "tool_result" || resultBlocks[1].(map[string]any)["tool_use_id"] != "call-two" {
+		t.Fatalf("tool results were not grouped using Anthropic blocks: %+v", resultBlocks)
 	}
 }

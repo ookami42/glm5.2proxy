@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,7 @@ type Completion struct {
 	Text         string
 	FinishReason string
 	ToolCalls    []ToolCall
+	Usage        map[string]any
 }
 
 type UpstreamError struct {
@@ -64,6 +67,7 @@ func New(cfg config.Config, bridge *captcha.Bridge) *Service {
 }
 
 func (s *Service) Request(ctx context.Context, upstreamConfig upstream.Config, body map[string]any) (*http.Response, int, error) {
+	upstreamConfig = withLogicalRequestIDs(upstreamConfig)
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, 0, err
@@ -79,8 +83,8 @@ func (s *Service) Request(ctx context.Context, upstreamConfig upstream.Config, b
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			upstreamError := decodeHTTPError(response)
-			if overloaded(upstreamError) && attempt < s.cfg.RetryMaxAttempts {
-				s.wait(ctx, attempt, "HTTP overloaded")
+			if retryable(upstreamError) && attempt < s.cfg.RetryMaxAttempts {
+				s.wait(ctx, attempt, "retryable HTTP error")
 				continue
 			}
 			upstreamError.Attempts = attempt
@@ -92,11 +96,12 @@ func (s *Service) Request(ctx context.Context, upstreamConfig upstream.Config, b
 }
 
 func (s *Service) Collect(ctx context.Context, upstreamConfig upstream.Config, body map[string]any) (Completion, int, error) {
+	upstreamConfig = withLogicalRequestIDs(upstreamConfig)
 	for attempt := 1; attempt <= s.cfg.RetryMaxAttempts; attempt++ {
 		response, _, err := s.RequestSingleAttempt(ctx, upstreamConfig, body)
 		if err != nil {
-			if overloaded(err) && attempt < s.cfg.RetryMaxAttempts {
-				s.wait(ctx, attempt, "upstream overloaded")
+			if retryable(err) && attempt < s.cfg.RetryMaxAttempts {
+				s.wait(ctx, attempt, "retryable upstream error")
 				continue
 			}
 			return Completion{}, attempt, err
@@ -104,8 +109,8 @@ func (s *Service) Collect(ctx context.Context, upstreamConfig upstream.Config, b
 		completion, parseErr := collectSSE(response.Body)
 		response.Body.Close()
 		if parseErr != nil {
-			if overloaded(parseErr) && attempt < s.cfg.RetryMaxAttempts && completion.Text == "" {
-				s.wait(ctx, attempt, "SSE overloaded")
+			if retryable(parseErr) && attempt < s.cfg.RetryMaxAttempts && completion.Text == "" && len(completion.ToolCalls) == 0 {
+				s.wait(ctx, attempt, "retryable SSE error")
 				continue
 			}
 			return completion, attempt, parseErr
@@ -116,16 +121,19 @@ func (s *Service) Collect(ctx context.Context, upstreamConfig upstream.Config, b
 }
 
 func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, body map[string]any, emit func(StreamEvent) error) (int, error) {
+	upstreamConfig = withLogicalRequestIDs(upstreamConfig)
 	for attempt := 1; attempt <= s.cfg.RetryMaxAttempts; attempt++ {
 		response, _, err := s.RequestSingleAttempt(ctx, upstreamConfig, body)
 		if err != nil {
-			if overloaded(err) && attempt < s.cfg.RetryMaxAttempts {
-				s.wait(ctx, attempt, "upstream overloaded")
+			if retryable(err) && attempt < s.cfg.RetryMaxAttempts {
+				s.wait(ctx, attempt, "retryable upstream error")
 				continue
 			}
 			return attempt, err
 		}
 		emitted := false
+		finalEmitted := false
+		pendingFinish := ""
 		streamErr := readSSE(response.Body, func(event string, data []byte) error {
 			if string(data) == "[DONE]" || len(data) == 0 {
 				return nil
@@ -162,18 +170,34 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 			}
 			if messageType == "message_delta" {
 				if reason := text(object(message["delta"])["stop_reason"]); reason != "" {
-					return emit(StreamEvent{Delta: map[string]any{}, FinishReason: mapFinishReason(reason)})
+					pendingFinish = mapFinishReason(reason)
+					if emitted {
+						finalEmitted = true
+						return emit(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+					}
 				}
 			}
 			if messageType == "message_stop" {
-				return emit(StreamEvent{Delta: map[string]any{}, FinishReason: "stop"})
+				if pendingFinish == "" {
+					pendingFinish = "stop"
+				}
+				if emitted && !finalEmitted {
+					finalEmitted = true
+					return emit(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+				}
 			}
 			return nil
 		})
 		response.Body.Close()
-		if streamErr != nil && overloaded(streamErr) && !emitted && attempt < s.cfg.RetryMaxAttempts {
-			s.wait(ctx, attempt, "SSE overloaded")
+		if streamErr == nil && !emitted {
+			streamErr = staleConnectionError()
+		}
+		if streamErr != nil && retryable(streamErr) && !emitted && attempt < s.cfg.RetryMaxAttempts {
+			s.wait(ctx, attempt, "retryable SSE error")
 			continue
+		}
+		if streamErr == nil && emitted && !finalEmitted && pendingFinish != "" {
+			streamErr = emit(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
 		}
 		return attempt, streamErr
 	}
@@ -207,9 +231,11 @@ func (s *Service) requestOnce(parent context.Context, upstreamConfig upstream.Co
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
-	request.Header.Set("X-Request-ID", randomID())
-	request.Header.Set("X-ZCode-Trace-ID", randomID())
-	request.Header.Set("X-Query-ID", randomID())
+	for _, name := range []string{"X-Request-ID", "X-ZCode-Trace-ID", "X-Query-ID"} {
+		if request.Header.Get(name) == "" {
+			request.Header.Set(name, randomID())
+		}
+	}
 	if s.cfg.CaptchaEnabled {
 		token, captchaErr := s.captcha.Fresh(ctx)
 		if captchaErr != nil {
@@ -253,6 +279,9 @@ func collectSSE(reader io.Reader) (Completion, error) {
 		if messageType == "error" || event == "error" {
 			return normalizeError(message, 502)
 		}
+		if messageType == "message_start" {
+			result.Usage = mergeUsage(result.Usage, object(object(message["message"])["usage"]))
+		}
 		if messageType == "content_block_start" {
 			block := object(message["content_block"])
 			if text(block["type"]) == "tool_use" {
@@ -275,6 +304,7 @@ func collectSSE(reader io.Reader) (Completion, error) {
 		}
 		if messageType == "message_delta" {
 			result.FinishReason = mapFinishReason(text(object(message["delta"])["stop_reason"]))
+			result.Usage = mergeUsage(result.Usage, object(message["usage"]))
 		}
 		return nil
 	})
@@ -282,6 +312,9 @@ func collectSSE(reader io.Reader) (Completion, error) {
 		if call := toolCalls[index]; call != nil {
 			result.ToolCalls = append(result.ToolCalls, *call)
 		}
+	}
+	if err == nil && result.Text == "" && len(result.ToolCalls) == 0 {
+		err = staleConnectionError()
 	}
 	return result, err
 }
@@ -351,6 +384,32 @@ func overloaded(err error) bool {
 	return fmt.Sprint(upstreamError.Code) == "1305" || upstreamError.Type == "overloaded_error" || strings.Contains(upstreamError.Message, "[1305]")
 }
 
+func retryable(err error) bool {
+	if err == nil || IsQuotaExhausted(err) {
+		return false
+	}
+	if overloaded(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var upstreamError *UpstreamError
+	if errors.As(err, &upstreamError) {
+		if upstreamError.Status == http.StatusRequestTimeout || upstreamError.Status == http.StatusTooEarly || upstreamError.Status >= 500 {
+			return true
+		}
+	}
+	value := strings.ToLower(err.Error())
+	for _, marker := range []string{"stale connection", "stream idle", "timeout", "timed out", "connection reset", "unexpected eof", "temporarily unavailable"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func staleConnectionError() error {
+	return &UpstreamError{Message: "upstream stream ended before producing text or tool calls", Type: "stale_connection", Status: http.StatusBadGateway}
+}
+
 func IsAdmissionConcurrency(err error) bool {
 	if err == nil {
 		return false
@@ -395,10 +454,7 @@ func IsQuotaExhausted(err error) bool {
 }
 
 func (s *Service) wait(ctx context.Context, attempt int, reason string) {
-	delay := s.cfg.RetryBaseDelay * time.Duration(attempt)
-	if delay > s.cfg.RetryMaxDelay {
-		delay = s.cfg.RetryMaxDelay
-	}
+	delay := retryDelay(s.cfg.RetryBaseDelay, s.cfg.RetryMaxDelay, attempt)
 	log.Printf("upstream retry %d/%d after %s; waiting %s", attempt+1, s.cfg.RetryMaxAttempts, reason, delay)
 	timer := time.NewTimer(delay)
 	select {
@@ -408,8 +464,49 @@ func (s *Service) wait(ctx context.Context, attempt int, reason string) {
 	}
 }
 
+func retryDelay(base, maximum time.Duration, attempt int) time.Duration {
+	delay := base
+	for step := 0; step < attempt; step++ {
+		if delay >= maximum/2 {
+			delay = maximum
+			break
+		}
+		delay *= 2
+	}
+	if delay > maximum {
+		delay = maximum
+	}
+	random := make([]byte, 2)
+	if _, err := rand.Read(random); err != nil {
+		return delay
+	}
+	factor := 0.5 + float64(int(random[0])<<8|int(random[1]))/131070
+	return time.Duration(float64(delay) * factor)
+}
+
 func randomID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	raw := hex.EncodeToString(value)
+	return raw[0:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:32]
+}
+
+func withLogicalRequestIDs(value upstream.Config) upstream.Config {
+	headers := make(map[string]string, len(value.BaseHeaders)+4)
+	for key, headerValue := range value.BaseHeaders {
+		headers[key] = headerValue
+	}
+	for _, name := range []string{"x-session-id", "x-request-id", "x-zcode-trace-id", "x-query-id"} {
+		if strings.TrimSpace(headers[name]) == "" {
+			headers[name] = randomID()
+		}
+	}
+	value.BaseHeaders = headers
+	return value
 }
 
 func mapFinishReason(reason string) string {
@@ -436,8 +533,23 @@ func text(value any) string {
 }
 
 func integer(value any) int {
-	number, _ := value.(float64)
-	return int(number)
+	switch number := value.(type) {
+	case int:
+		return number
+	case int32:
+		return int(number)
+	case int64:
+		return int(number)
+	case float32:
+		return int(number)
+	case float64:
+		return int(number)
+	case json.Number:
+		parsed, _ := number.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
 }
 
 func first(values ...string) string {
@@ -456,4 +568,26 @@ func firstAny(values ...any) any {
 		}
 	}
 	return nil
+}
+
+func mergeUsage(current map[string]any, value map[string]any) map[string]any {
+	if current == nil {
+		current = map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+	}
+	prompt := integer(current["prompt_tokens"])
+	if input := integer(value["input_tokens"]); input > 0 {
+		prompt = input + integer(value["cache_read_input_tokens"]) + integer(value["cache_creation_input_tokens"])
+		current["prompt_tokens"] = prompt
+		cached := integer(value["cache_read_input_tokens"])
+		if cached > 0 {
+			current["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
+		}
+	}
+	completion := integer(current["completion_tokens"])
+	if output := integer(value["output_tokens"]); output > 0 {
+		completion = output
+		current["completion_tokens"] = completion
+	}
+	current["total_tokens"] = prompt + completion
+	return current
 }

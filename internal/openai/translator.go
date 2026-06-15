@@ -2,7 +2,6 @@ package openai
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"glm5.2proxy/internal/models"
@@ -15,9 +14,16 @@ func ToAnthropic(body map[string]any, template map[string]any, model models.Mode
 		out = map[string]any{}
 	}
 	out["model"] = model.UpstreamID
-	maxTokens := numberOr(body["max_tokens"], numberOr(body["max_completion_tokens"], numberOr(out["max_tokens"], float64(defaultMaxTokens))))
-	if maxTokens < 1 {
-		maxTokens = float64(defaultMaxTokens)
+	maxTokens := numberOr(out["max_tokens"], float64(defaultMaxTokens))
+	requestedOutput, hasRequestedOutput := requestedMaxOutput(body)
+	if hasRequestedOutput {
+		maxTokens = requestedOutput
+		if thinking.Enabled && thinking.BudgetTokens > 0 {
+			maxTokens += float64(thinking.BudgetTokens)
+		}
+		if maxTokens > float64(defaultMaxTokens) {
+			maxTokens = float64(defaultMaxTokens)
+		}
 	}
 	out["max_tokens"] = maxTokens
 	out["stream"] = true
@@ -68,13 +74,22 @@ func adjustedThinkingBudget(thinking state.ThinkingSettings, maxTokens int) int 
 		return 0
 	}
 	budget := thinking.BudgetTokens
-	if maximum := maxTokens / 2; budget > maximum {
+	if maximum := maxTokens - 1; budget > maximum {
 		budget = maximum
 	}
 	if budget < 1024 {
 		return 0
 	}
 	return budget
+}
+
+func requestedMaxOutput(body map[string]any) (float64, bool) {
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		if value, ok := body[key].(float64); ok && value > 0 {
+			return value, true
+		}
+	}
+	return 0, false
 }
 
 func convertMessages(input []any, forceBlocks bool) ([]any, []any) {
@@ -90,8 +105,12 @@ func convertMessages(input []any, forceBlocks bool) ([]any, []any) {
 			continue
 		}
 		if role == "tool" {
-			value := fmt.Sprintf("Tool result%s:\n%s", toolID(message), contentText(message["content"]))
-			messages = append(messages, map[string]any{"role": "user", "content": anthropicContent(value, forceBlocks)})
+			block := map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": first(text(message["tool_call_id"]), randomID()),
+				"content":     toolResultText(message["content"]),
+			}
+			messages = appendMessage(messages, "user", []any{block})
 			continue
 		}
 		targetRole := "user"
@@ -118,12 +137,34 @@ func convertMessages(input []any, forceBlocks bool) ([]any, []any) {
 			}
 			content = blocks
 		}
-		messages = append(messages, map[string]any{"role": targetRole, "content": content})
+		messages = appendMessage(messages, targetRole, content)
 	}
 	if len(messages) == 0 {
 		messages = append(messages, map[string]any{"role": "user", "content": ""})
 	}
 	return system, messages
+}
+
+func appendMessage(messages []any, role string, content any) []any {
+	if len(messages) == 0 {
+		return append(messages, map[string]any{"role": role, "content": content})
+	}
+	last := object(messages[len(messages)-1])
+	if text(last["role"]) != role {
+		return append(messages, map[string]any{"role": role, "content": content})
+	}
+	last["content"] = append(contentBlocks(last["content"]), contentBlocks(content)...)
+	return messages
+}
+
+func contentBlocks(value any) []any {
+	if blocks, ok := value.([]any); ok {
+		return blocks
+	}
+	if text, ok := value.(string); ok && text != "" {
+		return []any{map[string]any{"type": "text", "text": text}}
+	}
+	return []any{}
 }
 
 func anthropicContent(value any, forceBlocks bool) any {
@@ -213,9 +254,13 @@ func contentText(value any) string {
 	return strings.Join(values, "\n")
 }
 
-func toolID(message map[string]any) string {
-	if id := text(message["tool_call_id"]); id != "" {
-		return " (" + id + ")"
+func toolResultText(value any) string {
+	if result := contentText(value); result != "" {
+		return result
+	}
+	raw, err := json.Marshal(value)
+	if err == nil && string(raw) != "null" {
+		return string(raw)
 	}
 	return ""
 }

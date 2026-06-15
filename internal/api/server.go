@@ -235,7 +235,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		if len(completion.ToolCalls) > 0 {
 			message["tool_calls"] = completion.ToolCalls
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": "chatcmpl-" + randomID(), "object": "chat.completion", "created": time.Now().Unix(), "model": model.ID, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": completion.FinishReason}}, "usage": nil})
+		writeJSON(w, http.StatusOK, map[string]any{"id": "chatcmpl-" + randomID(), "object": "chat.completion", "created": time.Now().Unix(), "model": model.ID, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": completion.FinishReason}}, "usage": completion.Usage})
 		onSuccess()
 		return
 	}
@@ -297,7 +297,7 @@ func (s *Server) skipQuotaExhaustedAccount(requestID, accountID string, model mo
 		return false
 	}
 	skipped[accountID] = true
-	s.logs.add("warn", "account.quota_exhausted", fmt.Sprintf("Request %s detectou cota esgotada para %s na conta %s; tentando pr?xima conta", requestID, model.ID, accountID))
+	s.logs.add("warn", "account.quota_exhausted", fmt.Sprintf("Request %s detectou cota esgotada para %s na conta %s; tentando proxima conta", requestID, model.ID, accountID))
 	return true
 }
 
