@@ -1,0 +1,37 @@
+# Local user data and secrets
+.env
+.env.*
+*.enc.json
+admin.json
+zcode-accounts*.json
+zcode-accounts*.enc.json
+captcha-headless-profile/
+
+# Logs and local IDE state
+.logs/
+.kilo/
+*.log
+
+# Extracted or patched third-party app artifacts
+*.asar
+.zcode-app.patched.asar
+extracted/
+app.asar.unpacked/
+
+# Go/Wails build outputs
+build/bin/
+build/*.exe
+build/*-linux-amd64
+dist/
+release-dist/
+
+# Frontend generated dependencies/build
+cmd/desktop/frontend/node_modules/
+cmd/desktop/frontend/dist/
+cmd/desktop/frontend/wailsjs/
+cmd/desktop/frontend/package.json.md5
+
+# Go/test cache and temporary files
+*.test
+*.tmp
+coverage.out
