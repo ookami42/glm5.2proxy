@@ -180,6 +180,40 @@ func TestProxyStreamingDoesNotEmitFalseStopBeforeEmptyStreamRetry(t *testing.T) 
 	}
 }
 
+func TestProxyStreamingRetriesPartialUpstreamBeforeClientEmission(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.CaptchaEnabled = false
+	cfg.RetryBaseDelay = time.Millisecond
+	var attempts atomic.Int32
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempts.Add(1) == 1 {
+			_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"broken\"}}\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"recovered\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer mock.Close()
+
+	service := proxy.New(cfg, captcha.NewBridge(cfg))
+	var text string
+	var finishes int
+	streamAttempts, err := service.Stream(context.Background(), upstream.Config{Endpoint: mock.URL, BaseHeaders: map[string]string{"authorization": "Bearer test"}, HasAuthorization: true}, map[string]any{"model": "GLM-5.2"}, func(event proxy.StreamEvent) error {
+		if value, ok := event.Delta["content"].(string); ok {
+			text += value
+		}
+		if event.FinishReason != "" {
+			finishes++
+		}
+		return nil
+	})
+	if err != nil || attempts.Load() != 2 || streamAttempts != 2 || text != "recovered" || finishes != 1 {
+		t.Fatalf("partial stream recovery failed: text=%q finishes=%d attempts=%d streamAttempts=%d err=%v", text, finishes, attempts.Load(), streamAttempts, err)
+	}
+}
+
 func TestProxyRetriesServerError(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.CaptchaEnabled = false
@@ -236,5 +270,35 @@ func TestProxyStreamingEvents(t *testing.T) {
 	})
 	if err != nil || content != "stream" || finishes != 1 {
 		t.Fatalf("unexpected raw stream events: content=%q finishes=%d err=%v", content, finishes, err)
+	}
+}
+
+func TestProxyStreamingReasoningContent(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.CaptchaEnabled = false
+	bridge := captcha.NewBridge(cfg)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"vou pensar\"}}\n\n"))
+		w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" mais\"}}\n\n"))
+		w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"resposta\"}}\n\n"))
+		w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer mock.Close()
+	service := proxy.New(cfg, bridge)
+	var reasoning string
+	var content string
+	_, err := service.Stream(context.Background(), upstream.Config{Endpoint: mock.URL, BaseHeaders: map[string]string{"authorization": "Bearer test"}, HasAuthorization: true}, map[string]any{"model": "GLM-5.2"}, func(event proxy.StreamEvent) error {
+		if value, ok := event.Delta["reasoning_content"].(string); ok {
+			reasoning += value
+		}
+		if value, ok := event.Delta["content"].(string); ok {
+			content += value
+		}
+		return nil
+	})
+	if err != nil || reasoning != "vou pensar mais" || content != "resposta" {
+		t.Fatalf("reasoning stream failed: reasoning=%q content=%q err=%v", reasoning, content, err)
 	}
 }

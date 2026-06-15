@@ -134,6 +134,11 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 		emitted := false
 		finalEmitted := false
 		pendingFinish := ""
+		events := []StreamEvent{}
+		emitAttempt := func(event StreamEvent) error {
+			events = append(events, event)
+			return nil
+		}
 		streamErr := readSSE(response.Body, func(event string, data []byte) error {
 			if string(data) == "[DONE]" || len(data) == 0 {
 				return nil
@@ -148,9 +153,15 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 			}
 			if messageType == "content_block_start" {
 				block := object(message["content_block"])
-				if text(block["type"]) == "tool_use" {
+				switch text(block["type"]) {
+				case "tool_use":
 					emitted = true
-					return emit(StreamEvent{Delta: map[string]any{"tool_calls": []any{map[string]any{"index": integer(message["index"]), "id": text(block["id"]), "type": "function", "function": map[string]any{"name": text(block["name"]), "arguments": ""}}}}})
+					return emitAttempt(StreamEvent{Delta: map[string]any{"tool_calls": []any{map[string]any{"index": integer(message["index"]), "id": text(block["id"]), "type": "function", "function": map[string]any{"name": text(block["name"]), "arguments": ""}}}}})
+				case "thinking", "reasoning":
+					if value := first(text(block["thinking"]), text(block["text"]), text(block["content"])); value != "" {
+						emitted = true
+						return emitAttempt(StreamEvent{Delta: map[string]any{"reasoning_content": value}})
+					}
 				}
 			}
 			if messageType == "content_block_delta" {
@@ -159,13 +170,24 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 				case "text_delta":
 					if value := text(delta["text"]); value != "" {
 						emitted = true
-						return emit(StreamEvent{Delta: map[string]any{"content": value}})
+						return emitAttempt(StreamEvent{Delta: map[string]any{"content": value}})
 					}
 				case "input_json_delta":
 					if value := text(delta["partial_json"]); value != "" {
 						emitted = true
-						return emit(StreamEvent{Delta: map[string]any{"tool_calls": []any{map[string]any{"index": integer(message["index"]), "function": map[string]any{"arguments": value}}}}})
+						return emitAttempt(StreamEvent{Delta: map[string]any{"tool_calls": []any{map[string]any{"index": integer(message["index"]), "function": map[string]any{"arguments": value}}}}})
 					}
+				case "thinking_delta", "reasoning_delta":
+					if value := first(text(delta["thinking"]), text(delta["text"]), text(delta["content"])); value != "" {
+						emitted = true
+						return emitAttempt(StreamEvent{Delta: map[string]any{"reasoning_content": value}})
+					}
+				}
+			}
+			if messageType == "thinking_delta" || messageType == "reasoning_delta" {
+				if value := first(text(message["thinking"]), text(message["text"]), text(message["content"])); value != "" {
+					emitted = true
+					return emitAttempt(StreamEvent{Delta: map[string]any{"reasoning_content": value}})
 				}
 			}
 			if messageType == "message_delta" {
@@ -173,7 +195,7 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 					pendingFinish = mapFinishReason(reason)
 					if emitted {
 						finalEmitted = true
-						return emit(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+						return emitAttempt(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
 					}
 				}
 			}
@@ -183,7 +205,7 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 				}
 				if emitted && !finalEmitted {
 					finalEmitted = true
-					return emit(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+					return emitAttempt(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
 				}
 			}
 			return nil
@@ -192,12 +214,24 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 		if streamErr == nil && !emitted {
 			streamErr = staleConnectionError()
 		}
-		if streamErr != nil && retryable(streamErr) && !emitted && attempt < s.cfg.RetryMaxAttempts {
+		if streamErr == nil && emitted && !finalEmitted {
+			if pendingFinish != "" {
+				finalEmitted = true
+				events = append(events, StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+			} else {
+				streamErr = staleConnectionError()
+			}
+		}
+		if streamErr != nil && retryable(streamErr) && attempt < s.cfg.RetryMaxAttempts {
 			s.wait(ctx, attempt, "retryable SSE error")
 			continue
 		}
-		if streamErr == nil && emitted && !finalEmitted && pendingFinish != "" {
-			streamErr = emit(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+		if streamErr == nil {
+			for _, event := range events {
+				if err := emit(event); err != nil {
+					return attempt, err
+				}
+			}
 		}
 		return attempt, streamErr
 	}
@@ -404,6 +438,33 @@ func retryable(err error) bool {
 		}
 	}
 	return false
+}
+
+func IsAuthFailed(err error) bool {
+	if err == nil || IsQuotaExhausted(err) || IsAdmissionConcurrency(err) {
+		return false
+	}
+	var upstreamError *UpstreamError
+	if !errors.As(err, &upstreamError) {
+		return false
+	}
+	if upstreamError.Status != http.StatusUnauthorized && upstreamError.Status != http.StatusForbidden {
+		return false
+	}
+	value := strings.ToLower(strings.Join([]string{
+		upstreamError.Message,
+		upstreamError.Type,
+		fmt.Sprint(upstreamError.Code),
+	}, " "))
+	if strings.Contains(value, "captcha") {
+		return false
+	}
+	for _, marker := range []string{"auth", "token", "jwt", "login", "session", "unauthorized", "invalid api key", "invalid key", "expired"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return upstreamError.Status == http.StatusUnauthorized
 }
 
 func staleConnectionError() error {

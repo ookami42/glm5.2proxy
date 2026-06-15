@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -174,9 +175,14 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID := randomID()
 	skipped := map[string]bool{}
+	authSkipped := false
 	for {
 		selection := s.pool.SelectSkipping(r.Context(), model, skipped)
 		if selection.AllExhausted {
+			if authSkipped {
+				writeError(w, http.StatusUnauthorized, "Todas as contas salvas parecem estar com login expirado. Abra o app, faca login novamente em uma conta Z.ai e tente de novo.", "zcode_all_accounts_auth_failed")
+				return
+			}
 			writeError(w, http.StatusTooManyRequests, "all saved ZCode accounts have exhausted quota for "+model.ID, "zcode_all_accounts_exhausted")
 			return
 		}
@@ -217,6 +223,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			if !started && s.skipQuotaExhaustedAccount(requestID, accountID, model, err, skipped) {
 				continue
 			}
+			if !started && s.skipAuthFailedAccount(requestID, accountID, err, skipped) {
+				authSkipped = true
+				continue
+			}
 			s.logs.add("error", "chat.failed", fmt.Sprintf("Streaming falhou apos %d tentativa(s): %v", attempts, err))
 			writeProxyError(w, err, attempts)
 			return
@@ -225,6 +235,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		lease.Release()
 		if err != nil {
 			if s.skipQuotaExhaustedAccount(requestID, accountID, model, err, skipped) {
+				continue
+			}
+			if s.skipAuthFailedAccount(requestID, accountID, err, skipped) {
+				authSkipped = true
 				continue
 			}
 			s.logs.add("error", "chat.failed", fmt.Sprintf("Request %s falhou apos %d tentativa(s): %v", requestID, attempts, err))
@@ -298,6 +312,15 @@ func (s *Server) skipQuotaExhaustedAccount(requestID, accountID string, model mo
 	}
 	skipped[accountID] = true
 	s.logs.add("warn", "account.quota_exhausted", fmt.Sprintf("Request %s detectou cota esgotada para %s na conta %s; tentando proxima conta", requestID, model.ID, accountID))
+	return true
+}
+
+func (s *Server) skipAuthFailedAccount(requestID, accountID string, err error, skipped map[string]bool) bool {
+	if accountID == "" || skipped[accountID] || !proxy.IsAuthFailed(err) {
+		return false
+	}
+	skipped[accountID] = true
+	s.logs.add("warn", "account.auth_failed", fmt.Sprintf("Request %s recebeu erro de login na conta %s; tentando proxima conta salva", requestID, accountID))
 	return true
 }
 
@@ -707,9 +730,32 @@ func writeProxyError(w http.ResponseWriter, err error, attempts int) {
 
 func errorPayload(err error) map[string]any {
 	if value, ok := err.(*proxy.UpstreamError); ok {
-		return map[string]any{"message": value.Message, "type": value.Type, "code": value.Code, "request_id": value.RequestID, "status": value.Status}
+		message := friendlyErrorMessage(value)
+		payload := map[string]any{"message": message, "type": value.Type, "code": value.Code, "request_id": value.RequestID, "status": value.Status}
+		if message != value.Message {
+			payload["technical_message"] = value.Message
+		}
+		return payload
 	}
 	return map[string]any{"message": err.Error(), "type": "upstream_error"}
+}
+
+func friendlyErrorMessage(err *proxy.UpstreamError) string {
+	switch {
+	case proxy.IsAdmissionConcurrency(err):
+		return "Opa, os servidores da Z.ai estao cheios no momento. Tente novamente em instantes."
+	case proxy.IsAuthFailed(err):
+		return "A sessao da Z.ai expirou ou ficou invalida. Abra o app, faca login novamente nessa conta e tente de novo."
+	case proxy.IsQuotaExhausted(err):
+		return "A cota dessa conta acabou para este modelo. O proxy vai tentar outra conta salva quando houver uma disponivel."
+	case err.Type == "stale_connection":
+		return "A conexao com a Z.ai caiu antes de gerar uma resposta completa. Tente novamente."
+	}
+	value := strings.ToLower(strings.Join([]string{err.Message, err.Type, fmt.Sprint(err.Code)}, " "))
+	if strings.Contains(value, "overloaded") || strings.Contains(value, "temporarily unavailable") {
+		return "Opa, os servidores da Z.ai estao instaveis no momento. Tente novamente em instantes."
+	}
+	return err.Message
 }
 
 func writeSSE(w http.ResponseWriter, value any) {
