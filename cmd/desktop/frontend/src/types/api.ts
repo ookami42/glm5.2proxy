@@ -43,10 +43,20 @@ export interface APIKey {
   createdAt: string
 }
 
+export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high' | 'max'
+
+export interface ThinkingSettings {
+  enabled: boolean
+  budgetTokens: number
+  effort: ThinkingEffort
+}
+
 export interface Settings {
   version: number
   port: number
   apiEnabled: boolean
   apiKeyRequired: boolean
+  globalThinking: ThinkingSettings
+  accountThinking: Record<string, ThinkingSettings>
   apiKeys: APIKey[]
 }

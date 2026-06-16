@@ -209,7 +209,7 @@ func convertTools(input []any) []any {
 		if text(tool["type"]) != "function" || text(function["name"]) == "" {
 			continue
 		}
-		schema := function["parameters"]
+		schema := sanitizeJSONSchema(function["parameters"])
 		if schema == nil {
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
@@ -234,6 +234,90 @@ func convertToolChoice(value any) any {
 		return map[string]any{"type": "tool", "name": text(function["name"])}
 	}
 	return map[string]any{"type": "auto"}
+}
+
+func sanitizeJSONSchema(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return sanitizeJSONSchemaObject(typed)
+	case []any:
+		result := make([]any, 0, len(typed))
+		for _, item := range typed {
+			result = append(result, sanitizeJSONSchema(item))
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func sanitizeJSONSchemaObject(schema map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{
+		"$ref", "$schema", "$id", "title", "description", "default", "const", "enum",
+		"type", "format", "pattern", "minLength", "maxLength", "minimum", "maximum",
+		"exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+	} {
+		if value, ok := schema[key]; ok {
+			out[key] = sanitizeJSONSchema(value)
+		}
+	}
+	if value, ok := schema["anyOf"]; ok {
+		out["anyOf"] = sanitizeJSONSchema(value)
+	} else if value, ok := schema["oneOf"]; ok {
+		out["anyOf"] = sanitizeJSONSchema(value)
+	}
+	if value, ok := schema["allOf"]; ok {
+		out["allOf"] = sanitizeJSONSchema(value)
+	}
+	if value, ok := schema["not"]; ok {
+		out["not"] = sanitizeJSONSchema(value)
+	}
+	if value, ok := schema["items"]; ok {
+		out["items"] = sanitizeJSONSchema(value)
+	}
+	if value, ok := schema["prefixItems"]; ok {
+		out["prefixItems"] = sanitizeJSONSchema(value)
+	}
+	if value, ok := schema["required"]; ok {
+		out["required"] = sanitizeJSONSchema(value)
+	}
+	if props, ok := schema["properties"].(map[string]any); ok {
+		outProps := make(map[string]any, len(props))
+		for name, prop := range props {
+			outProps[name] = sanitizeJSONSchema(prop)
+		}
+		out["properties"] = outProps
+	}
+	if defs, ok := schema["definitions"].(map[string]any); ok {
+		outDefs := make(map[string]any, len(defs))
+		for name, def := range defs {
+			outDefs[name] = sanitizeJSONSchema(def)
+		}
+		out["definitions"] = outDefs
+	}
+	if defs, ok := schema["$defs"].(map[string]any); ok {
+		outDefs := make(map[string]any, len(defs))
+		for name, def := range defs {
+			outDefs[name] = sanitizeJSONSchema(def)
+		}
+		out["$defs"] = outDefs
+	}
+	if isObjectSchema(schema) {
+		if _, ok := out["properties"]; !ok {
+			out["properties"] = map[string]any{}
+		}
+		out["additionalProperties"] = false
+	}
+	return out
+}
+
+func isObjectSchema(schema map[string]any) bool {
+	if text(schema["type"]) == "object" {
+		return true
+	}
+	_, hasProperties := schema["properties"]
+	return hasProperties
 }
 
 func contentText(value any) string {

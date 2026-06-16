@@ -117,3 +117,62 @@ func TestTranslationUsesNativeToolResultsAndGroupsConsecutiveResults(t *testing.
 		t.Fatalf("tool results were not grouped using Anthropic blocks: %+v", resultBlocks)
 	}
 }
+
+func TestTranslationSanitizesToolJSONSchemaForAnthropic(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	body := map[string]any{
+		"model": "glm-5.2",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "click the button"},
+		},
+		"tools": []any{map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "browser_click",
+				"description": "Click an element",
+				"parameters": map[string]any{
+					"type":                  "object",
+					"unevaluatedProperties": false,
+					"properties": map[string]any{
+						"target": map[string]any{
+							"type":        "string",
+							"description": "Exact target selector",
+							"oneOf": []any{
+								map[string]any{"const": "button", "title": "Button"},
+								map[string]any{"const": "link", "title": "Link"},
+							},
+						},
+						"options": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"doubleClick": map[string]any{"type": "boolean"},
+							},
+						},
+					},
+					"required": []any{"target"},
+				},
+			},
+		}},
+	}
+
+	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{}, 64000)
+	tool := translated["tools"].([]any)[0].(map[string]any)
+	schema := tool["input_schema"].(map[string]any)
+	if _, ok := schema["unevaluatedProperties"]; ok {
+		t.Fatalf("unsupported schema field leaked to upstream: %+v", schema)
+	}
+	if schema["additionalProperties"] != false {
+		t.Fatalf("object schema must be closed for Anthropic-style tools: %+v", schema)
+	}
+	target := schema["properties"].(map[string]any)["target"].(map[string]any)
+	if _, ok := target["oneOf"]; ok {
+		t.Fatalf("oneOf should be converted before upstream request: %+v", target)
+	}
+	if _, ok := target["anyOf"]; !ok {
+		t.Fatalf("anyOf missing after schema conversion: %+v", target)
+	}
+	options := schema["properties"].(map[string]any)["options"].(map[string]any)
+	if options["additionalProperties"] != false {
+		t.Fatalf("nested object schema must also be closed: %+v", options)
+	}
+}

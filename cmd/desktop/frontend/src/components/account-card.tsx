@@ -1,9 +1,22 @@
+import { useEffect, useMemo, useState } from 'react'
 import { motion, Reorder, useDragControls } from 'framer-motion'
-import { ArrowDown, ArrowUp, Check, GripVertical, RefreshCw, UserRound } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUp,
+  BrainCircuit,
+  Check,
+  Gauge,
+  GripVertical,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  UserRound,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
-import type { Account, QuotaBalance } from '@/types/api'
+import type { Account, QuotaBalance, ThinkingEffort, ThinkingSettings } from '@/types/api'
 
 interface AccountCardProps {
   account: Account
@@ -11,15 +24,35 @@ interface AccountCardProps {
   isFirst: boolean
   isLast: boolean
   refreshing: boolean
+  globalThinking: ThinkingSettings | null
+  accountThinking: ThinkingSettings | null
   onActivate: () => void
   onMoveUp: () => void
   onMoveDown: () => void
   onRefresh: () => void
   onDragEnd: () => void
+  onSaveThinking: (value: ThinkingSettings) => Promise<void>
+  onResetThinking: () => Promise<void>
 }
 
+const DEFAULT_THINKING: ThinkingSettings = {
+  enabled: true,
+  budgetTokens: 32000,
+  effort: 'max',
+}
+
+const EFFORT_OPTIONS: Array<{ value: ThinkingEffort; label: string; hint: string }> = [
+  { value: 'none', label: 'Off', hint: 'Sem pensamento' },
+  { value: 'low', label: 'Leve', hint: 'Mais rapido' },
+  { value: 'medium', label: 'Medio', hint: 'Equilibrado' },
+  { value: 'high', label: 'Alto', hint: 'Mais cuidadoso' },
+  { value: 'max', label: 'Max', hint: 'Maior budget' },
+]
+
+const BUDGET_PRESETS = [8000, 16000, 32000, 48000, 64000]
+
 function formatTokens(value: number | null): string {
-  if (value == null) return '—'
+  if (value == null) return '--'
   return new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 }
 
@@ -27,6 +60,15 @@ function quotaColor(percent: number): string {
   if (percent >= 90) return 'bg-red-500'
   if (percent >= 70) return 'bg-amber-400'
   return 'bg-emerald-500'
+}
+
+function clampBudget(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_THINKING.budgetTokens
+  return Math.max(0, Math.min(64000, Math.round(value)))
+}
+
+function effortLabel(value: ThinkingEffort): string {
+  return EFFORT_OPTIONS.find((option) => option.value === value)?.label ?? value
 }
 
 function ModelQuota({ balance }: { balance: QuotaBalance }) {
@@ -44,9 +86,192 @@ function ModelQuota({ balance }: { balance: QuotaBalance }) {
       </div>
       <Progress value={percent} indicatorClassName={quotaColor(percent)} className="h-1.5" />
       <div className="mt-1.5 flex justify-between text-[10px] text-muted-foreground">
-        <span>{formatTokens(balance.available)} disponíveis</span>
+        <span>{formatTokens(balance.available)} disponiveis</span>
         <span>{formatTokens(balance.remaining)} restantes</span>
       </div>
+    </div>
+  )
+}
+
+interface ThinkingControlProps {
+  globalThinking: ThinkingSettings | null
+  accountThinking: ThinkingSettings | null
+  onSave: (value: ThinkingSettings) => Promise<void>
+  onReset: () => Promise<void>
+}
+
+function ThinkingControl({ globalThinking, accountThinking, onSave, onReset }: ThinkingControlProps) {
+  const inherited = !accountThinking
+  const effective = useMemo(
+    () => accountThinking ?? globalThinking ?? DEFAULT_THINKING,
+    [accountThinking, globalThinking]
+  )
+  const [draft, setDraft] = useState<ThinkingSettings>(effective)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setDraft(effective)
+    setError(null)
+  }, [effective.enabled, effective.budgetTokens, effective.effort])
+
+  const dirty =
+    draft.enabled !== effective.enabled ||
+    draft.budgetTokens !== effective.budgetTokens ||
+    draft.effort !== effective.effort
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      await onSave({ ...draft, budgetTokens: clampBudget(draft.budgetTokens) })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Nao foi possivel salvar')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const reset = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      await onReset()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Nao foi possivel resetar')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-border/60 bg-background/35 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-foreground/7 text-foreground">
+            <BrainCircuit className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-xs font-semibold">Esforco de raciocinio</p>
+              <span
+                className={cn(
+                  'rounded px-1.5 py-0.5 text-[10px] font-semibold',
+                  inherited
+                    ? 'bg-muted text-muted-foreground'
+                    : 'bg-emerald-500/12 text-emerald-500'
+                )}
+              >
+                {inherited ? 'Herdando global' : 'Personalizado'}
+              </span>
+            </div>
+            <p className="truncate text-[11px] text-muted-foreground">
+              {draft.enabled
+                ? `${effortLabel(draft.effort)} - budget ${formatTokens(draft.budgetTokens)} tokens`
+                : 'Pensamento desativado para esta conta'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-medium text-muted-foreground">Ativo</span>
+          <Switch
+            checked={draft.enabled}
+            onCheckedChange={(enabled) =>
+              setDraft((current) => ({
+                ...current,
+                enabled,
+                effort: enabled && current.effort === 'none' ? 'medium' : current.effort,
+              }))
+            }
+          />
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-[1.2fr_.8fr_auto] lg:items-end">
+        <div>
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Gauge className="h-3.5 w-3.5" />
+            Nivel
+          </div>
+          <div className="grid grid-cols-5 gap-1">
+            {EFFORT_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                title={option.hint}
+                onClick={() =>
+                  setDraft((current) => ({
+                    ...current,
+                    effort: option.value,
+                    enabled: option.value === 'none' ? false : true,
+                    budgetTokens: option.value === 'none' ? 0 : current.budgetTokens || DEFAULT_THINKING.budgetTokens,
+                  }))
+                }
+                className={cn(
+                  'rounded-md border px-2 py-1.5 text-[11px] font-semibold transition-colors',
+                  draft.effort === option.value
+                    ? 'border-emerald-500/60 bg-emerald-500/12 text-emerald-500'
+                    : 'border-border/60 bg-card/40 text-muted-foreground hover:bg-accent hover:text-foreground'
+                )}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-[11px] font-medium text-muted-foreground">
+            Budget tokens
+          </label>
+          <input
+            type="number"
+            min={0}
+            max={64000}
+            step={1000}
+            value={draft.budgetTokens}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, budgetTokens: clampBudget(Number(event.target.value)) }))
+            }
+            className="h-8 w-full rounded-md border border-border/70 bg-background px-2 text-xs outline-none transition-colors focus:border-emerald-500/70"
+          />
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {BUDGET_PRESETS.map((value) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setDraft((current) => ({ ...current, enabled: true, budgetTokens: value }))}
+                className={cn(
+                  'rounded border px-1.5 py-0.5 text-[10px] transition-colors',
+                  draft.budgetTokens === value
+                    ? 'border-emerald-500/60 bg-emerald-500/12 text-emerald-500'
+                    : 'border-border/50 text-muted-foreground hover:text-foreground'
+                )}
+              >
+                {formatTokens(value)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex gap-2 lg:justify-end">
+          <Button variant="outline" size="sm" onClick={reset} disabled={saving || inherited}>
+            <RotateCcw className="h-3.5 w-3.5" />
+            Herdar
+          </Button>
+          <Button size="sm" onClick={save} disabled={saving || !dirty}>
+            <Save className="h-3.5 w-3.5" />
+            Salvar
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <p className="mt-2 rounded border border-red-500/25 bg-red-500/5 px-2 py-1.5 text-[11px] text-red-400">
+          {error}
+        </p>
+      )}
     </div>
   )
 }
@@ -57,11 +282,15 @@ export function AccountCard({
   isFirst,
   isLast,
   refreshing,
+  globalThinking,
+  accountThinking,
   onActivate,
   onMoveUp,
   onMoveDown,
   onRefresh,
   onDragEnd,
+  onSaveThinking,
+  onResetThinking,
 }: AccountCardProps) {
   const dragControls = useDragControls()
   const displayName = account.user.name || account.label
@@ -148,6 +377,13 @@ export function AccountCard({
               </div>
             </div>
 
+            <ThinkingControl
+              globalThinking={globalThinking}
+              accountThinking={accountThinking}
+              onSave={onSaveThinking}
+              onReset={onResetThinking}
+            />
+
             {account.quota ? (
               <div className="mt-4 grid gap-2 sm:grid-cols-2">
                 {account.quota.balances.map((balance) => (
@@ -156,7 +392,7 @@ export function AccountCard({
               </div>
             ) : account.quotaError ? (
               <div className="mt-4 rounded-md border border-red-500/25 bg-red-500/5 px-3 py-2 text-xs text-red-400">
-                Não foi possível consultar a cota: {account.quotaError.message}
+                Nao foi possivel consultar a cota: {account.quotaError.message}
               </div>
             ) : (
               <div className="mt-4 h-[74px] animate-pulse rounded-md bg-muted/60" />

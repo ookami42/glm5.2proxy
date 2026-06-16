@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
-import type { Settings } from '@/types/api'
+import type { Settings, ThinkingSettings } from '@/types/api'
 
 interface UpdateResult {
   settings: Settings
@@ -50,9 +50,42 @@ export function useSettings() {
     await refresh()
   }
 
+  const setAccountThinking = async (accountId: string, value: ThinkingSettings) => {
+    const res = await api.put<{
+      accountId: string
+      override: ThinkingSettings
+      effective: ThinkingSettings
+      inherited: boolean
+    }>(`/api/admin/accounts/${accountId}/thinking`, value)
+    await refresh()
+    return res
+  }
+
+  const resetAccountThinking = async (accountId: string) => {
+    const res = await api.delete<{
+      accountId: string
+      override: null
+      effective: ThinkingSettings
+      inherited: boolean
+    }>(`/api/admin/accounts/${accountId}/thinking`)
+    await refresh()
+    return res
+  }
+
   useEffect(() => {
     refresh()
   }, [])
 
-  return { settings, loading, error, refresh, updatePort, setAPIEnabled, createAPIKey, deleteAPIKey }
+  return {
+    settings,
+    loading,
+    error,
+    refresh,
+    updatePort,
+    setAPIEnabled,
+    createAPIKey,
+    deleteAPIKey,
+    setAccountThinking,
+    resetAccountThinking,
+  }
 }

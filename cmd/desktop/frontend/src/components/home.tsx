@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { useAccounts } from '@/hooks/use-accounts'
 import { useSettings } from '@/hooks/use-settings'
 import { api } from '@/lib/api'
-import type { Account } from '@/types/api'
+import type { Account, ThinkingSettings } from '@/types/api'
 
 function move(items: Account[], from: number, to: number): Account[] {
   const next = [...items]
@@ -73,6 +73,14 @@ export function Home() {
     const target = index + direction
     if (target < 0 || target >= accounts.length) return
     await persistOrder(move(accounts, index, target))
+  }
+
+  const saveAccountThinking = async (accountId: string, value: ThinkingSettings) => {
+    await settingsState.setAccountThinking(accountId, value)
+  }
+
+  const resetAccountThinking = async (accountId: string) => {
+    await settingsState.resetAccountThinking(accountId)
   }
 
   return (
@@ -163,11 +171,15 @@ export function Home() {
                     isFirst={index === 0}
                     isLast={index === accounts.length - 1}
                     refreshing={refreshing}
+                    globalThinking={settings?.globalThinking ?? null}
+                    accountThinking={settings?.accountThinking?.[account.id] ?? null}
                     onActivate={() => activate(account.id)}
                     onMoveUp={() => moveAccount(index, -1)}
                     onMoveDown={() => moveAccount(index, 1)}
                     onRefresh={refreshAccounts}
                     onDragEnd={() => persistOrder(dragOrderRef.current)}
+                    onSaveThinking={(value) => saveAccountThinking(account.id, value)}
+                    onResetThinking={() => resetAccountThinking(account.id)}
                   />
                 ))}
               </Reorder.Group>
