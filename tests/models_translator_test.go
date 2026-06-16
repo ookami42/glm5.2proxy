@@ -176,3 +176,31 @@ func TestTranslationSanitizesToolJSONSchemaForAnthropic(t *testing.T) {
 		t.Fatalf("nested object schema must also be closed: %+v", options)
 	}
 }
+
+func TestTranslationPreservesTemplateSystemWhenClientDoesNotProvideOne(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	template := map[string]any{
+		"system": []any{
+			map[string]any{"type": "text", "text": "You are ZCode", "cache_control": map[string]any{"type": "ephemeral"}},
+		},
+	}
+	body := map[string]any{
+		"model": "glm-5.2",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "oi"},
+		},
+	}
+
+	translated := openai.ToAnthropic(body, template, model, state.ThinkingSettings{}, 64000)
+	system := translated["system"].([]any)
+	if len(system) != 1 {
+		t.Fatalf("template system should be preserved when client has no system message: %+v", translated)
+	}
+	block := system[0].(map[string]any)
+	if block["text"] != "You are ZCode" {
+		t.Fatalf("unexpected preserved system block: %+v", block)
+	}
+	if _, ok := block["cache_control"]; !ok {
+		t.Fatalf("template system metadata should survive translation: %+v", block)
+	}
+}

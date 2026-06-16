@@ -88,7 +88,7 @@ func (l *Loader) Load(account *accounts.Account) Config {
 		"x-zcode-app-version": first(os.Getenv("ZCODE_APP_VERSION"), header(headers, "X-ZCode-App-Version"), l.cfg.AppVersion),
 		"x-title":             first(os.Getenv("ZCODE_TITLE"), header(headers, "X-Title"), "Z Code@electron"),
 		"x-zcode-agent":       first(os.Getenv("ZCODE_AGENT"), header(headers, "X-ZCode-Agent"), "glm"),
-		"x-session-id":        os.Getenv("ZCODE_SESSION_ID"),
+		"x-session-id":        first(os.Getenv("ZCODE_SESSION_ID"), header(headers, "X-Session-ID")),
 	}
 	if captcha != "" {
 		baseHeaders["x-aliyun-captcha-verify-param"] = captcha

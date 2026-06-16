@@ -9,7 +9,7 @@ import (
 	"glm5.2proxy/internal/upstream"
 )
 
-func TestUpstreamLoaderClonesOfficialHeadersWithoutReusingCapturedSession(t *testing.T) {
+func TestUpstreamLoaderClonesOfficialHeadersAndPreservesCapturedSession(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Authorization = "Bearer test"
 	if err := os.MkdirAll(cfg.ModelIODir, 0o700); err != nil {
@@ -28,7 +28,7 @@ func TestUpstreamLoaderClonesOfficialHeadersWithoutReusingCapturedSession(t *tes
 	if loaded.BaseHeaders["x-title"] != "Z Code@electron" || loaded.BaseHeaders["x-zcode-agent"] != "glm" {
 		t.Fatalf("official ZCode identity headers were not preserved: %+v", loaded.BaseHeaders)
 	}
-	if loaded.BaseHeaders["x-session-id"] != "" {
-		t.Fatalf("captured official session must not be reused by the proxy: %+v", loaded.BaseHeaders)
+	if loaded.BaseHeaders["x-session-id"] != "official-session" {
+		t.Fatalf("captured official session must be preserved for captcha-bound requests: %+v", loaded.BaseHeaders)
 	}
 }

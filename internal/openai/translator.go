@@ -31,7 +31,7 @@ func ToAnthropic(body map[string]any, template map[string]any, model models.Mode
 	out["messages"] = messages
 	if len(system) > 0 {
 		out["system"] = system
-	} else {
+	} else if len(array(out["system"])) == 0 {
 		delete(out, "system")
 	}
 	tools := convertTools(array(body["tools"]))
