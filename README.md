@@ -120,8 +120,11 @@ build\glm5.2proxy-server-windows-amd64.exe
 build\glm5.2proxy-server-linux-amd64
 build\bin\glm5.2proxy.exe
 release-dist\glm5.2proxy-windows-desktop-amd64.zip
+release-dist\glm5.2proxy-linux-desktop-amd64.tar.gz
+release-dist\glm5.2proxy-linux-desktop-amd64.deb
 release-dist\glm5.2proxy-windows-server-amd64.zip
 release-dist\glm5.2proxy-linux-server-amd64.zip
+release-dist\SHA256SUMS.txt
 ```
 
 `build/`, `release-dist/`, `cmd/desktop/frontend/dist/` e `node_modules/` sao
