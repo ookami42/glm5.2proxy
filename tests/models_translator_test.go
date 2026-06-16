@@ -204,3 +204,31 @@ func TestTranslationPreservesTemplateSystemWhenClientDoesNotProvideOne(t *testin
 		t.Fatalf("template system metadata should survive translation: %+v", block)
 	}
 }
+
+func TestTranslationAppendsClientSystemToTemplateSystem(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	template := map[string]any{
+		"system": []any{
+			map[string]any{"type": "text", "text": "You are ZCode", "cache_control": map[string]any{"type": "ephemeral"}},
+		},
+	}
+	body := map[string]any{
+		"model": "glm-5.2",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "follow the user's repo conventions"},
+			map[string]any{"role": "user", "content": "oi"},
+		},
+	}
+
+	translated := openai.ToAnthropic(body, template, model, state.ThinkingSettings{}, 64000)
+	system := translated["system"].([]any)
+	if len(system) != 2 {
+		t.Fatalf("client system must be appended to the template system: %+v", translated)
+	}
+	if system[0].(map[string]any)["text"] != "You are ZCode" {
+		t.Fatalf("template system must stay first: %+v", system)
+	}
+	if system[1].(map[string]any)["text"] != "follow the user's repo conventions" {
+		t.Fatalf("client system must be preserved after template system: %+v", system)
+	}
+}

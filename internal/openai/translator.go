@@ -30,7 +30,11 @@ func ToAnthropic(body map[string]any, template map[string]any, model models.Mode
 	system, messages := convertMessages(array(body["messages"]), template != nil)
 	out["messages"] = messages
 	if len(system) > 0 {
-		out["system"] = system
+		if baseSystem := array(out["system"]); len(baseSystem) > 0 {
+			out["system"] = append(baseSystem, system...)
+		} else {
+			out["system"] = system
+		}
 	} else if len(array(out["system"])) == 0 {
 		delete(out, "system")
 	}

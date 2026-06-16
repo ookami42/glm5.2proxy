@@ -9,13 +9,36 @@ import (
 	"glm5.2proxy/internal/upstream"
 )
 
-func TestUpstreamLoaderClonesOfficialHeadersAndPreservesCapturedSession(t *testing.T) {
+func TestUpstreamLoaderUsesNativeTemplateWithoutModelIO(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Authorization = "Bearer test"
+	store, err := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := upstream.NewLoader(cfg, store).Load(nil)
+	if loaded.Source != "environment" {
+		t.Fatalf("unexpected source without model-io: %s", loaded.Source)
+	}
+	if loaded.Endpoint != cfg.UpstreamURL {
+		t.Fatalf("unexpected endpoint: %s", loaded.Endpoint)
+	}
+	system := loaded.BodyTemplate["system"].([]any)
+	if len(system) != 3 {
+		t.Fatalf("native body template must ship the ZCode system prompt: %+v", loaded.BodyTemplate)
+	}
+	if loaded.BaseHeaders["x-title"] != "Z Code@electron" || loaded.BaseHeaders["x-zcode-agent"] != "glm" {
+		t.Fatalf("native ZCode identity headers missing: %+v", loaded.BaseHeaders)
+	}
+}
+
+func TestUpstreamLoaderFallsBackToCapturedAuthorizationAndPreservesCapturedSession(t *testing.T) {
+	cfg := testConfig(t)
 	if err := os.MkdirAll(cfg.ModelIODir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	record := `{"request":{"headers":{"Authorization":"Bearer captured","X-Title":"Z Code@electron","X-ZCode-Agent":"glm","x-session-id":"official-session"},"body":{"model":"GLM-5.2","stream":true}}}`
+	record := `{"request":{"headers":{"Authorization":"Bearer captured","X-Title":"Z Code@electron","X-ZCode-Agent":"glm","x-session-id":"official-session"},"body":{"model":"GLM-5.2","stream":true,"system":[{"type":"text","text":"You are ZCode"}],"messages":[{"role":"user","content":[{"type":"text","text":"oi"}]}]}}}`
 	if err := os.WriteFile(filepath.Join(cfg.ModelIODir, "model-io-test.jsonl"), []byte(record+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -25,10 +48,17 @@ func TestUpstreamLoaderClonesOfficialHeadersAndPreservesCapturedSession(t *testi
 	}
 
 	loaded := upstream.NewLoader(cfg, store).Load(nil)
+	if loaded.BaseHeaders["authorization"] != "Bearer captured" {
+		t.Fatalf("captured authorization should be a fallback when no account/env auth exists: %+v", loaded.BaseHeaders)
+	}
 	if loaded.BaseHeaders["x-title"] != "Z Code@electron" || loaded.BaseHeaders["x-zcode-agent"] != "glm" {
 		t.Fatalf("official ZCode identity headers were not preserved: %+v", loaded.BaseHeaders)
 	}
 	if loaded.BaseHeaders["x-session-id"] != "official-session" {
 		t.Fatalf("captured official session must be preserved for captcha-bound requests: %+v", loaded.BaseHeaders)
+	}
+	system := loaded.BodyTemplate["system"].([]any)
+	if len(system) != 3 {
+		t.Fatalf("native template should stay authoritative even when model-io exists: %+v", loaded.BodyTemplate)
 	}
 }

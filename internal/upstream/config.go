@@ -34,7 +34,7 @@ func NewLoader(cfg config.Config, store *accounts.Store) *Loader {
 func (l *Loader) Load(account *accounts.Account) Config {
 	record, source := latestModelIO(l.cfg.ModelIODir)
 	headers := map[string]string{}
-	template := map[string]any(nil)
+	template := nativeBodyTemplate()
 	endpoint := l.cfg.UpstreamURL
 	if request, ok := record["request"].(map[string]any); ok {
 		if captured, ok := request["headers"].(map[string]any); ok {
@@ -43,9 +43,6 @@ func (l *Loader) Load(account *accounts.Account) Config {
 					headers[key] = text
 				}
 			}
-		}
-		if body, ok := request["body"].(map[string]any); ok {
-			template = body
 		}
 		if provider, ok := request["providerOptions"].(map[string]any); ok {
 			if endpoints, ok := provider["endpoints"].(map[string]any); ok && os.Getenv("ZCODE_UPSTREAM_URL") == "" {
@@ -76,8 +73,10 @@ func (l *Loader) Load(account *accounts.Account) Config {
 	if activeSource == "" {
 		if l.cfg.Authorization != "" {
 			activeSource = "environment"
-		} else {
+		} else if authorization != "" && source != "" {
 			activeSource = source
+		} else {
+			activeSource = "builtin:zai-start-plan"
 		}
 	}
 	captcha := first(os.Getenv("ZCODE_CAPTCHA_VERIFY_PARAM"), header(headers, "X-Aliyun-Captcha-Verify-Param"))
@@ -99,6 +98,43 @@ func (l *Loader) Load(account *accounts.Account) Config {
 		}
 	}
 	return Config{Endpoint: endpoint, BaseHeaders: baseHeaders, BodyTemplate: template, Source: activeSource, ActiveAccount: public, HasAuthorization: authorization != "", HasCaptcha: captcha != ""}
+}
+
+func nativeBodyTemplate() map[string]any {
+	return map[string]any{
+		"max_tokens": float64(64000),
+		"thinking": map[string]any{
+			"type":          "enabled",
+			"budget_tokens": float64(32000),
+		},
+		"output_config": map[string]any{
+			"effort": "max",
+		},
+		"stream": true,
+		"system": []any{
+			map[string]any{
+				"type": "text",
+				"text": "You are ZCode, an interactive coding agent",
+				"cache_control": map[string]any{
+					"type": "ephemeral",
+				},
+			},
+			map[string]any{
+				"type": "text",
+				"text": "\nYou are an interactive ZCode agent that helps users with software engineering tasks.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n- Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n- Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n- `<system-reminder>` tags in messages and tool results are injected by the harness, not the user. Hooks may intercept tool calls; treat hook output as user feedback.\n- Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n- Reference code as `file_path:line_number` — it's clickable.",
+				"cache_control": map[string]any{
+					"type": "ephemeral",
+				},
+			},
+			map[string]any{
+				"type": "text",
+				"text": "Write code that reads like the surrounding code: match its comment density, naming, and idiom.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target — if what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Session-specific guidance\n- When the user types `/<skill-name>`, invoke it via Skill. Only use skills listed in the user-invocable skills section — don't guess.\n\n# Environment\nYou have been invoked in the following environment:\n- Primary working directory: C:\\Users\\maicon2\\ZCodeProject\n- Is a git repository: no\n- Platform: win32\n- Shell: cmd.exe\n- OS Version: win32 10.0.26200 x64\n- You are powered by the model named builtin:zai-start-plan/GLM-5.2.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.",
+				"cache_control": map[string]any{
+					"type": "ephemeral",
+				},
+			},
+		},
+	}
 }
 
 func latestModelIO(directory string) (map[string]any, string) {
@@ -123,7 +159,8 @@ func latestModelIO(directory string) (map[string]any, string) {
 			}
 			request, _ := record["request"].(map[string]any)
 			headers, _ := request["headers"].(map[string]any)
-			if headerAny(headers, "Authorization") != "" {
+			body, _ := request["body"].(map[string]any)
+			if headerAny(headers, "Authorization") != "" && validTemplateBody(body) {
 				handle.Close()
 				return record, file
 			}
@@ -131,6 +168,26 @@ func latestModelIO(directory string) (map[string]any, string) {
 		handle.Close()
 	}
 	return map[string]any{}, ""
+}
+
+func validTemplateBody(body map[string]any) bool {
+	if text(body["model"]) == "" {
+		return false
+	}
+	if len(arrayAny(body["messages"])) == 0 {
+		return false
+	}
+	return len(arrayAny(body["system"])) > 0
+}
+
+func text(value any) string {
+	result, _ := value.(string)
+	return result
+}
+
+func arrayAny(value any) []any {
+	result, _ := value.([]any)
+	return result
 }
 
 func header(values map[string]string, target string) string {
