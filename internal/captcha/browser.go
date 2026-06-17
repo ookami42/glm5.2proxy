@@ -18,6 +18,7 @@ type BrowserSnapshot struct {
 	Enabled    bool           `json:"enabled"`
 	Running    bool           `json:"running"`
 	PID        int            `json:"pid"`
+	Client     string         `json:"client"`
 	Executable string         `json:"executable"`
 	ProfileDir string         `json:"profileDir"`
 	StartedAt  *time.Time     `json:"startedAt"`
@@ -74,7 +75,7 @@ func (m *BrowserManager) Snapshot() BrowserSnapshot {
 	if m.command != nil && m.command.Process != nil {
 		pid = m.command.Process.Pid
 	}
-	return BrowserSnapshot{Enabled: m.cfg.HeadlessEnabled, Running: pid != 0, PID: pid, Executable: executableOf(m.command), ProfileDir: m.cfg.HeadlessProfileDir, StartedAt: m.started, LastExit: m.lastExit}
+	return BrowserSnapshot{Enabled: m.cfg.HeadlessEnabled, Running: pid != 0, PID: pid, Client: m.launchClient(), Executable: executableOf(m.command), ProfileDir: m.cfg.HeadlessProfileDir, StartedAt: m.started, LastExit: m.lastExit}
 }
 
 func (m *BrowserManager) loop(ctx context.Context) {
@@ -91,10 +92,17 @@ func (m *BrowserManager) loop(ctx context.Context) {
 			return
 		}
 		_ = os.MkdirAll(m.cfg.HeadlessProfileDir, 0o700)
-		url := fmt.Sprintf("http://127.0.0.1:%d/zcode/captcha/browser?client=headless-browser", m.port)
-		args := []string{"--headless=new", "--user-data-dir=" + m.cfg.HeadlessProfileDir, "--no-first-run", "--no-default-browser-check", "--disable-breakpad", "--disable-component-extensions-with-background-pages", "--disable-component-update", "--disable-default-apps", "--disable-extensions", "--disable-sync", "--disable-features=GlobalMediaControls,MediaRouter,OptimizationHints,Translate,msEdgeUpdateLaunchServicesPreferredVersion", "--metrics-recording-only", "--mute-audio", "--window-size=800,600", url}
+		clientName := m.launchClient()
+		url := fmt.Sprintf("http://127.0.0.1:%d/zcode/captcha/browser?client=%s", m.port, clientName)
+		args := []string{"--user-data-dir=" + m.cfg.HeadlessProfileDir, "--no-first-run", "--no-default-browser-check", "--disable-breakpad", "--disable-component-extensions-with-background-pages", "--disable-component-update", "--disable-default-apps", "--disable-extensions", "--disable-sync", "--disable-features=GlobalMediaControls,MediaRouter,OptimizationHints,Translate,msEdgeUpdateLaunchServicesPreferredVersion", "--metrics-recording-only", "--mute-audio", "--window-size=1100,900"}
+		if clientName == "headless-browser" {
+			args = append(args, "--headless=new")
+		}
+		args = append(args, url)
 		command := exec.Command(executable, args...)
-		hideProcess(command)
+		if clientName == "headless-browser" {
+			hideProcess(command)
+		}
 		if err := command.Start(); err != nil {
 			m.mu.Lock()
 			m.lastExit = map[string]any{"at": time.Now().UnixMilli(), "error": err.Error()}
@@ -114,7 +122,7 @@ func (m *BrowserManager) loop(ctx context.Context) {
 		m.command = command
 		m.started = &now
 		m.mu.Unlock()
-		log.Printf("captcha headless browser started: %s pid=%d", filepath.Base(executable), command.Process.Pid)
+		log.Printf("captcha browser started: client=%s executable=%s pid=%d", clientName, filepath.Base(executable), command.Process.Pid)
 		err := command.Wait()
 		m.mu.Lock()
 		m.command = nil
@@ -132,6 +140,13 @@ func (m *BrowserManager) loop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (m *BrowserManager) launchClient() string {
+	if m.cfg.CaptchaPreferredClient == "headless-browser" {
+		return "headless-browser"
+	}
+	return "standalone-browser"
 }
 
 func (m *BrowserManager) findExecutable() string {

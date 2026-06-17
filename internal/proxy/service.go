@@ -50,6 +50,7 @@ func (e *UpstreamError) Error() string { return e.Message }
 type Service struct {
 	cfg     config.Config
 	captcha *captcha.Bridge
+	runtime *runtimeHeaderManager
 	client  *http.Client
 }
 
@@ -63,17 +64,21 @@ func New(cfg config.Config, bridge *captcha.Bridge) *Service {
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 20
 	transport.IdleConnTimeout = 90 * time.Second
-	return &Service{cfg: cfg, captcha: bridge, client: &http.Client{Transport: transport}}
+	return &Service{cfg: cfg, captcha: bridge, runtime: newRuntimeHeaderManager(cfg, bridge), client: &http.Client{Transport: transport}}
 }
 
 func (s *Service) Request(ctx context.Context, upstreamConfig upstream.Config, body map[string]any) (*http.Response, int, error) {
-	upstreamConfig = withLogicalRequestIDs(upstreamConfig)
+	upstreamConfig = withStableLogicalRequestIDs(upstreamConfig)
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, 0, err
 	}
 	for attempt := 1; attempt <= s.cfg.RetryMaxAttempts; attempt++ {
-		response, err := s.requestOnce(ctx, upstreamConfig, raw)
+		prepared, prepareErr := s.runtime.Prepare(ctx, upstreamConfig)
+		if prepareErr != nil {
+			return nil, attempt, prepareErr
+		}
+		response, err := s.requestOnce(ctx, prepared, raw)
 		if err != nil {
 			if attempt < s.cfg.RetryMaxAttempts {
 				s.wait(ctx, attempt, "fetch error")
@@ -96,15 +101,31 @@ func (s *Service) Request(ctx context.Context, upstreamConfig upstream.Config, b
 }
 
 func (s *Service) Collect(ctx context.Context, upstreamConfig upstream.Config, body map[string]any) (Completion, int, error) {
-	upstreamConfig = withLogicalRequestIDs(upstreamConfig)
+	upstreamConfig = withStableLogicalRequestIDs(upstreamConfig)
 	for attempt := 1; attempt <= s.cfg.RetryMaxAttempts; attempt++ {
-		response, _, err := s.RequestSingleAttempt(ctx, upstreamConfig, body)
+		prepared, prepareErr := s.runtime.Prepare(ctx, upstreamConfig)
+		if prepareErr != nil {
+			return Completion{}, attempt, prepareErr
+		}
+		raw, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			return Completion{}, attempt, marshalErr
+		}
+		response, err := s.requestOnce(ctx, prepared, raw)
 		if err != nil {
 			if retryable(err) && attempt < s.cfg.RetryMaxAttempts {
 				s.wait(ctx, attempt, "retryable upstream error")
 				continue
 			}
 			return Completion{}, attempt, err
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			upstreamErr := decodeHTTPError(response)
+			if retryable(upstreamErr) && attempt < s.cfg.RetryMaxAttempts {
+				s.wait(ctx, attempt, "retryable upstream error")
+				continue
+			}
+			return Completion{}, attempt, upstreamErr
 		}
 		completion, parseErr := collectSSE(response.Body)
 		response.Body.Close()
@@ -121,15 +142,31 @@ func (s *Service) Collect(ctx context.Context, upstreamConfig upstream.Config, b
 }
 
 func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, body map[string]any, emit func(StreamEvent) error) (int, error) {
-	upstreamConfig = withLogicalRequestIDs(upstreamConfig)
+	upstreamConfig = withStableLogicalRequestIDs(upstreamConfig)
 	for attempt := 1; attempt <= s.cfg.RetryMaxAttempts; attempt++ {
-		response, _, err := s.RequestSingleAttempt(ctx, upstreamConfig, body)
+		prepared, prepareErr := s.runtime.Prepare(ctx, upstreamConfig)
+		if prepareErr != nil {
+			return attempt, prepareErr
+		}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return attempt, err
+		}
+		response, err := s.requestOnce(ctx, prepared, raw)
 		if err != nil {
 			if retryable(err) && attempt < s.cfg.RetryMaxAttempts {
 				s.wait(ctx, attempt, "retryable upstream error")
 				continue
 			}
 			return attempt, err
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			upstreamErr := decodeHTTPError(response)
+			if retryable(upstreamErr) && attempt < s.cfg.RetryMaxAttempts {
+				s.wait(ctx, attempt, "retryable upstream error")
+				continue
+			}
+			return attempt, upstreamErr
 		}
 		emitted := false
 		finalEmitted := false
@@ -239,6 +276,12 @@ func (s *Service) Stream(ctx context.Context, upstreamConfig upstream.Config, bo
 }
 
 func (s *Service) RequestSingleAttempt(ctx context.Context, upstreamConfig upstream.Config, body map[string]any) (*http.Response, int, error) {
+	upstreamConfig = withStableLogicalRequestIDs(upstreamConfig)
+	var err error
+	upstreamConfig, err = s.runtime.Prepare(ctx, upstreamConfig)
+	if err != nil {
+		return nil, 0, err
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, 1, err
@@ -265,19 +308,6 @@ func (s *Service) requestOnce(parent context.Context, upstreamConfig upstream.Co
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
-	for _, name := range []string{"X-Request-ID", "X-ZCode-Trace-ID", "X-Query-ID"} {
-		if request.Header.Get(name) == "" {
-			request.Header.Set(name, randomID())
-		}
-	}
-	if s.cfg.CaptchaEnabled {
-		token, captchaErr := s.captcha.Fresh(ctx)
-		if captchaErr != nil {
-			cancel()
-			return nil, captchaErr
-		}
-		request.Header.Set("X-Aliyun-Captcha-Verify-Param", token)
-	}
 	response, err := s.client.Do(request)
 	if err != nil {
 		cancel()
@@ -573,12 +603,12 @@ func randomID() string {
 	return raw[0:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:32]
 }
 
-func withLogicalRequestIDs(value upstream.Config) upstream.Config {
-	headers := make(map[string]string, len(value.BaseHeaders)+4)
+func withStableLogicalRequestIDs(value upstream.Config) upstream.Config {
+	headers := make(map[string]string, len(value.BaseHeaders)+3)
 	for key, headerValue := range value.BaseHeaders {
 		headers[key] = headerValue
 	}
-	for _, name := range []string{"x-session-id", "x-request-id", "x-zcode-trace-id", "x-query-id"} {
+	for _, name := range []string{"x-request-id", "x-zcode-trace-id", "x-query-id"} {
 		if strings.TrimSpace(headers[name]) == "" {
 			headers[name] = randomID()
 		}

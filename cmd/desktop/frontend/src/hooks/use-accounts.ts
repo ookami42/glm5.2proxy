@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
 import type { Account, AccountsResponse } from '@/types/api'
 
-export function useAccounts(pollInterval = 30000) {
+export function useAccounts(pollInterval = 5000) {
   const [data, setData] = useState<AccountsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)

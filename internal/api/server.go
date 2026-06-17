@@ -41,6 +41,7 @@ type Server struct {
 	queue    *requestqueue.Queue
 	http     *http.Server
 	logs     *logBuffer
+	reserve  *usageReserve
 }
 
 func New(
@@ -56,7 +57,7 @@ func New(
 	browser *captcha.BrowserManager,
 	proxyService *proxy.Service,
 ) *Server {
-	server := &Server{cfg: cfg, port: port, admin: admin, accounts: accountStore, oauth: oauth, quota: quotaService, pool: pool, loader: loader, captcha: bridge, browser: browser, proxy: proxyService, queue: requestqueue.New(), logs: newLogBuffer(500)}
+	server := &Server{cfg: cfg, port: port, admin: admin, accounts: accountStore, oauth: oauth, quota: quotaService, pool: pool, loader: loader, captcha: bridge, browser: browser, proxy: proxyService, queue: requestqueue.New(), logs: newLogBuffer(500), reserve: newUsageReserve(cfg)}
 	server.http = &http.Server{Addr: net.JoinHostPort(cfg.Host, strconv.Itoa(port)), Handler: server.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	return server
 }
@@ -177,6 +178,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	skipped := map[string]bool{}
 	authSkipped := false
 	for {
+		previousActive := s.accounts.Active()
 		selection := s.pool.SelectSkipping(r.Context(), model, skipped)
 		if selection.AllExhausted {
 			if authSkipped {
@@ -194,6 +196,41 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		if selection.Account != nil {
 			accountID = selection.Account.ID
 		}
+		if selection.Rotated && selection.Account != nil {
+			fromLabel := "nenhuma conta anterior"
+			if previousActive != nil {
+				fromLabel = accounts.Sanitize(*previousActive).Label
+			}
+			toLabel := accounts.Sanitize(*selection.Account).Label
+			s.logs.add(
+				"info",
+				"account.rotated",
+				fmt.Sprintf("Request %s trocou automaticamente a conta de %s para %s ao selecionar %s", requestID, fromLabel, toLabel, model.ID),
+			)
+		}
+		requiredUnits := s.reserve.Minimum(model.ID, s.cfg.AccountMinAvailable)
+		if accountID != "" && selection.Balance != nil && selection.Balance.Available != nil && *selection.Balance.Available < requiredUnits {
+			skipped[accountID] = true
+			s.logs.add(
+				"warn",
+				"account.reserve_insufficient",
+				fmt.Sprintf(
+					"Request %s pulou a conta %s antes do chat: disponivel=%d, minimo dinamico=%d para %s",
+					requestID,
+					accountID,
+					*selection.Balance.Available,
+					requiredUnits,
+					model.ID,
+				),
+			)
+			fallback := s.pool.SelectSkipping(r.Context(), model, skipped)
+			if !fallback.AllExhausted && fallback.Account != nil {
+				selection = fallback
+				accountID = fallback.Account.ID
+			} else {
+				delete(skipped, accountID)
+			}
+		}
 		queueKey := requestqueue.Key(accountID, model.ID)
 		thinking := s.admin.ThinkingFor(accountID)
 		upstreamBody := openai.ToAnthropic(body, selection.Config.BodyTemplate, model, thinking, s.cfg.DefaultMaxTokens)
@@ -207,6 +244,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		if lease.Position() > 0 {
 			s.logs.add("info", "queue.released", fmt.Sprintf("Request %s liberado apos aguardar fila %s", requestID, queueKey))
+			lease.Release()
+			continue
 		}
 		onSuccess := func() {
 			s.logs.add("info", "chat.completed", fmt.Sprintf("Request %s concluido com %s", requestID, model.ID))
@@ -808,6 +847,9 @@ func (s *Server) logQuota(requestID string, upstreamConfig upstream.Config, mode
 			break
 		}
 	}
+	if usedDelta, ok := deltaInt(before, after); ok {
+		s.reserve.Observe(model.ID, usedDelta)
+	}
 	log.Printf("[quota] request=%s model=%s antiga used=%s remaining=%s available=%s -> atualizada used=%s remaining=%s available=%s deltaUsed=%s", requestID, model.UpstreamID, pointer(before, func(v *quota.Balance) *int64 { return v.Used }), pointer(before, func(v *quota.Balance) *int64 { return v.Remaining }), pointer(before, func(v *quota.Balance) *int64 { return v.Available }), pointer(after, func(v *quota.Balance) *int64 { return v.Used }), pointer(after, func(v *quota.Balance) *int64 { return v.Remaining }), pointer(after, func(v *quota.Balance) *int64 { return v.Available }), delta(before, after))
 	s.logs.add("info", "quota.updated", fmt.Sprintf(
 		"Request %s · %s · cota antiga %s usados/%s disponíveis → cota nova %s usados/%s disponíveis · delta %s",
@@ -989,6 +1031,17 @@ func delta(before, after *quota.Balance) string {
 		return "unknown"
 	}
 	return strconv.FormatInt(*after.Used-*before.Used, 10)
+}
+
+func deltaInt(before, after *quota.Balance) (int64, bool) {
+	if before == nil || after == nil || before.Used == nil || after.Used == nil {
+		return 0, false
+	}
+	value := *after.Used - *before.Used
+	if value <= 0 {
+		return 0, false
+	}
+	return value, true
 }
 
 func (s *Server) Port() int { return s.port }

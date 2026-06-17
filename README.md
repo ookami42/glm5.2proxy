@@ -80,6 +80,16 @@ go vet ./...
 npm run build --prefix .\cmd\desktop\frontend
 ```
 
+### Resumo rapido
+
+- Quer **so a API/proxy**? Build do `cmd/server`.
+- Quer **o app com interface desktop Wails**? Build do app desktop.
+- **Linux headless/server** pode ser compilado a partir do Windows.
+- **Linux desktop Wails** deve ser compilado em ambiente Linux real ou WSL2 com
+  as dependencias graficas instaladas. Nao conte com Windows puro para isso.
+
+### Windows
+
 Servidor Windows:
 
 ```powershell
@@ -99,7 +109,10 @@ Saida principal:
 build\bin\glm5.2proxy.exe
 ```
 
-Servidor Linux amd64 a partir do Windows:
+### Linux server/headless compilado no Windows
+
+Se o objetivo for rodar apenas a API OpenAI-compatible sem interface grafica,
+este comando gera um binario Linux amd64 diretamente da maquina Windows:
 
 ```powershell
 $env:CGO_ENABLED='0'
@@ -109,6 +122,42 @@ go build -trimpath -ldflags='-s -w' `
   -o build\glm5.2proxy-server-linux-amd64 ./cmd/server
 Remove-Item Env:GOOS,Env:GOARCH,Env:CGO_ENABLED -ErrorAction SilentlyContinue
 ```
+
+Depois, no Linux:
+
+```bash
+chmod +x ./glm5.2proxy-server-linux-amd64
+./glm5.2proxy-server-linux-amd64
+```
+
+### Linux desktop Wails
+
+O app desktop Linux **nao deve ser buildado no Windows puro**. O caminho
+correto e buildar em:
+
+- Linux nativo; ou
+- WSL2/Ubuntu; ou
+- CI Linux.
+
+Exemplo em Ubuntu/WSL2:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+go test ./...
+npm install
+npm run desktop:build
+```
+
+Saida esperada do desktop Linux:
+
+```text
+build/bin/glm5.2proxy
+```
+
+Se o usuario Linux baixou este repositorio do GitHub, ele ja estara com o
+codigo mais recente; o que ele precisa fazer por conta propria e apenas o build
+do binario Linux, caso nao exista release pronta para o sistema dele.
 
 ## Release Local
 
@@ -127,8 +176,9 @@ release-dist\glm5.2proxy-linux-server-amd64.zip
 release-dist\SHA256SUMS.txt
 ```
 
-`build/`, `release-dist/`, `cmd/desktop/frontend/dist/` e `node_modules/` sao
-artefatos locais e ficam fora do Git pelo `.gitignore`.
+`release-dist/`, `cmd/desktop/frontend/dist/` e `node_modules/` sao artefatos
+locais normalmente ignorados pelo Git. Alguns binarios dentro de `build/` podem
+ser versionados manualmente quando o repositorio publica uma build pronta.
 
 ## Uso no Windows
 
@@ -152,6 +202,20 @@ C:\Users\<usuario>\.glm5.2proxy
 
 Essa pasta contem contas, tokens e configuracoes locais. Nao envie junto com
 release ou commit.
+
+## Uso no Linux
+
+Se voce esta no Linux e **nao existe binario pronto para o seu sistema** no
+repositorio/release, faca assim:
+
+1. Baixe o repositorio atual.
+2. Escolha se quer `server` ou `desktop`.
+3. Para `server`, compile o `cmd/server`.
+4. Para `desktop`, compile em Linux/WSL2, nao em Windows puro.
+5. Rode o binario gerado e configure a conta/API key pelo painel ou pela API.
+
+Em outras palavras: o repositorio ja contem o codigo novo; o que pode faltar e
+somente o artefato Linux pronto.
 
 ## Modelos
 

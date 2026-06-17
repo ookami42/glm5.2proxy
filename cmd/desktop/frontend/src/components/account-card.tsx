@@ -21,6 +21,7 @@ import type { Account, QuotaBalance, ThinkingEffort, ThinkingSettings } from '@/
 interface AccountCardProps {
   account: Account
   isActive: boolean
+  isSwitching: boolean
   isFirst: boolean
   isLast: boolean
   refreshing: boolean
@@ -279,6 +280,7 @@ function ThinkingControl({ globalThinking, accountThinking, onSave, onReset }: T
 export function AccountCard({
   account,
   isActive,
+  isSwitching,
   isFirst,
   isLast,
   refreshing,
@@ -313,12 +315,33 @@ export function AccountCard({
     >
       <motion.article
         layout
+        animate={
+          isSwitching
+            ? {
+                scale: [1, 1.018, 1],
+                boxShadow: [
+                  '0 8px 28px rgba(16,185,129,.08)',
+                  '0 0 0 1px rgba(16,185,129,.45), 0 24px 64px rgba(16,185,129,.22)',
+                  '0 8px 28px rgba(16,185,129,.08)',
+                ],
+              }
+            : undefined
+        }
+        transition={{ duration: 1.2, ease: 'easeOut' }}
         className={cn(
           'group relative overflow-hidden rounded-lg border bg-card/75',
           'transition-colors duration-200',
           isActive ? 'border-emerald-500/60 shadow-[0_8px_28px_rgba(16,185,129,.08)]' : 'border-border/70',
         )}
       >
+        {isSwitching && (
+          <motion.div
+            initial={{ opacity: 0, x: '-100%' }}
+            animate={{ opacity: [0, 0.8, 0], x: ['-100%', '15%', '100%'] }}
+            transition={{ duration: 1.4, ease: 'easeInOut' }}
+            className="pointer-events-none absolute inset-y-0 left-0 w-40 bg-gradient-to-r from-transparent via-emerald-400/18 to-transparent"
+          />
+        )}
         <div className="flex items-stretch">
           <button
             type="button"
@@ -349,6 +372,11 @@ export function AccountCard({
                     {isActive && (
                       <span className="inline-flex items-center gap-1 rounded bg-emerald-500/12 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-500">
                         <Check className="h-3 w-3" /> Em uso
+                      </span>
+                    )}
+                    {isSwitching && (
+                      <span className="inline-flex items-center gap-1 rounded bg-sky-500/12 px-1.5 py-0.5 text-[10px] font-semibold text-sky-400">
+                        Conta trocada agora
                       </span>
                     )}
                   </div>

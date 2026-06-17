@@ -17,6 +17,7 @@ type Config struct {
 	BaseHeaders      map[string]string
 	BodyTemplate     map[string]any
 	Source           string
+	AccountID        string
 	ActiveAccount    *accounts.PublicAccount
 	HasAuthorization bool
 	HasCaptcha       bool
@@ -97,7 +98,11 @@ func (l *Loader) Load(account *accounts.Account) Config {
 			delete(baseHeaders, key)
 		}
 	}
-	return Config{Endpoint: endpoint, BaseHeaders: baseHeaders, BodyTemplate: template, Source: activeSource, ActiveAccount: public, HasAuthorization: authorization != "", HasCaptcha: captcha != ""}
+	accountID := ""
+	if account != nil {
+		accountID = account.ID
+	}
+	return Config{Endpoint: endpoint, BaseHeaders: baseHeaders, BodyTemplate: template, Source: activeSource, AccountID: accountID, ActiveAccount: public, HasAuthorization: authorization != "", HasCaptcha: captcha != ""}
 }
 
 func nativeBodyTemplate() map[string]any {

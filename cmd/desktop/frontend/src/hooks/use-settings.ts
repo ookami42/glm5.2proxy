@@ -50,6 +50,12 @@ export function useSettings() {
     await refresh()
   }
 
+  const setGlobalThinking = async (value: ThinkingSettings) => {
+    const res = await api.put<ThinkingSettings>('/api/admin/thinking', value)
+    await refresh()
+    return res
+  }
+
   const setAccountThinking = async (accountId: string, value: ThinkingSettings) => {
     const res = await api.put<{
       accountId: string
@@ -85,6 +91,7 @@ export function useSettings() {
     setAPIEnabled,
     createAPIKey,
     deleteAPIKey,
+    setGlobalThinking,
     setAccountThinking,
     resetAccountThinking,
   }

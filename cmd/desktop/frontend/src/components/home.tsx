@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Reorder } from 'framer-motion'
-import { Activity, KeyRound, ListRestart, Plus, RefreshCw, Server } from 'lucide-react'
+import { AnimatePresence, motion, Reorder } from 'framer-motion'
+import { Activity, ArrowRight, Clock3, KeyRound, ListRestart, Plus, RefreshCw, Server, Settings2, Sparkles } from 'lucide-react'
 import { AccountCard } from '@/components/account-card'
 import { APISettingsDialog } from '@/components/api-settings-dialog'
 import { LoginDialog } from '@/components/login-dialog'
 import { LogsDialog } from '@/components/logs-dialog'
+import { SettingsDialog } from '@/components/settings-dialog'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
 import { useAccounts } from '@/hooks/use-accounts'
@@ -19,6 +20,14 @@ function move(items: Account[], from: number, to: number): Account[] {
   return next
 }
 
+function formatElapsed(from: number, now: number): string {
+  const diffSeconds = Math.max(0, Math.floor((now - from) / 1000))
+  if (diffSeconds < 60) return `${diffSeconds}s`
+  const minutes = Math.floor(diffSeconds / 60)
+  const seconds = diffSeconds % 60
+  return `${minutes}m ${seconds}s`
+}
+
 export function Home() {
   const { data: accountsData, loading, error: accountsError, refresh, reorder } = useAccounts()
   const settingsState = useSettings()
@@ -26,8 +35,12 @@ export function Home() {
   const [loginOpen, setLoginOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
   const [apiSettingsOpen, setAPISettingsOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [switchEvent, setSwitchEvent] = useState<{ fromId: string | null; toId: string; timestamp: number } | null>(null)
+  const [now, setNow] = useState(() => Date.now())
   const dragOrderRef = useRef<Account[]>([])
+  const previousActiveIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (accountsData) {
@@ -37,12 +50,42 @@ export function Home() {
   }, [accountsData])
 
   const activeAccountId = accountsData?.activeAccountId ?? null
+  const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? null
   const settings = settingsState.settings
   const apiStatusText = settings?.apiEnabled
     ? settings.apiKeys.length > 0
       ? `${settings.apiKeys.length} API key${settings.apiKeys.length === 1 ? '' : 's'} local${settings.apiKeys.length === 1 ? '' : 's'} - /v1/chat/completions disponivel`
       : 'Sem API key local - localhost liberado - /v1/chat/completions disponivel'
     : 'O painel continua funcionando; clientes /v1 recebem API indisponivel'
+
+  useEffect(() => {
+    if (!activeAccountId) {
+      previousActiveIdRef.current = activeAccountId
+      return
+    }
+    const previousActiveId = previousActiveIdRef.current
+    if (previousActiveId && previousActiveId !== activeAccountId) {
+      setSwitchEvent({ fromId: previousActiveId, toId: activeAccountId, timestamp: Date.now() })
+    }
+    previousActiveIdRef.current = activeAccountId
+  }, [activeAccountId])
+
+  useEffect(() => {
+    if (!switchEvent) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const cleanup = window.setTimeout(() => setSwitchEvent((current) => {
+      if (!current) return current
+      return Date.now() - current.timestamp >= 45000 ? null : current
+    }), 45000)
+    return () => {
+      window.clearInterval(timer)
+      window.clearTimeout(cleanup)
+    }
+  }, [switchEvent])
+
+  const findAccount = (id: string | null) => accounts.find((account) => account.id === id) ?? null
+  const previousAccount = switchEvent ? findAccount(switchEvent.fromId) : null
+  const switchedAccount = switchEvent ? findAccount(switchEvent.toId) : null
 
   const persistOrder = async (ordered: Account[]) => {
     setAccounts(ordered)
@@ -92,6 +135,9 @@ export function Home() {
           {settings && <span className="text-xs text-muted-foreground">127.0.0.1:{settings.port}</span>}
         </div>
         <div className="flex items-center gap-1.5">
+          <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)}>
+            <Settings2 className="h-4 w-4" /> Config
+          </Button>
           <Button variant="ghost" size="sm" onClick={() => setLogsOpen(true)}>
             <Activity className="h-4 w-4" /> Logs
           </Button>
@@ -105,7 +151,7 @@ export function Home() {
       <main className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-5xl space-y-6 px-6 py-6">
           {settings && (
-            <section className={`flex items-center justify-between rounded-lg border px-4 py-3 ${settings.apiEnabled ? 'border-emerald-500/30 bg-emerald-500/[.045]' : 'border-border/70 bg-card/50'}`}>
+          <section className={`flex items-center justify-between rounded-lg border px-4 py-3 ${settings.apiEnabled ? 'border-emerald-500/30 bg-emerald-500/[.045]' : 'border-border/70 bg-card/50'}`}>
               <div className="flex items-center gap-3">
                 <div className={`flex h-9 w-9 items-center justify-center rounded-md ${settings.apiEnabled ? 'bg-emerald-500/12 text-emerald-500' : 'bg-muted text-muted-foreground'}`}>
                   <Server className="h-4 w-4" />
@@ -121,15 +167,73 @@ export function Home() {
               >
                 {settings.apiEnabled ? 'Parar API' : 'Iniciar API'}
               </Button>
-            </section>
+          </section>
           )}
+
+          <AnimatePresence initial={false}>
+            {switchEvent && switchedAccount && (
+              <motion.section
+                key={switchEvent.timestamp}
+                initial={{ opacity: 0, y: 18, scale: 0.985 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -12 }}
+                transition={{ duration: 0.35, ease: 'easeOut' }}
+                className="relative overflow-hidden rounded-2xl border border-sky-400/30 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_40%),linear-gradient(135deg,rgba(15,23,42,0.94),rgba(9,14,24,0.98))] p-4 text-slate-50 shadow-[0_18px_55px_rgba(14,165,233,0.16)]"
+              >
+                <motion.div
+                  initial={{ opacity: 0.25, x: '-30%' }}
+                  animate={{ opacity: [0.2, 0.5, 0.2], x: ['-30%', '15%', '85%'] }}
+                  transition={{ duration: 2.4, repeat: Infinity, ease: 'linear' }}
+                  className="pointer-events-none absolute inset-y-0 left-0 w-40 bg-gradient-to-r from-transparent via-sky-300/18 to-transparent"
+                />
+                <div className="relative flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div className="min-w-0">
+                    <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-sky-300/20 bg-sky-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-200">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Conta trocada
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-base font-semibold md:text-lg">
+                      <span className="truncate">{previousAccount?.label ?? 'Conta anterior'}</span>
+                      <ArrowRight className="h-4 w-4 text-sky-300" />
+                      <span className="truncate text-sky-200">{switchedAccount.label}</span>
+                    </div>
+                    <p className="mt-1 text-sm text-slate-300">
+                      {switchedAccount.user.email || switchedAccount.user.name || switchedAccount.id}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Momento</p>
+                      <p className="mt-1 text-sm font-medium text-slate-100">
+                        {new Date(switchEvent.timestamp).toLocaleTimeString('pt-BR')}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                      <p className="flex items-center gap-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
+                        <Clock3 className="h-3.5 w-3.5" />
+                        Tempo desde a troca
+                      </p>
+                      <p className="mt-1 text-sm font-medium text-sky-200">
+                        {formatElapsed(switchEvent.timestamp, now)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </motion.section>
+            )}
+          </AnimatePresence>
 
           <section>
             <div className="mb-4 flex items-end justify-between gap-4">
               <div>
                 <h1 className="text-2xl font-semibold">Fila de contas</h1>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {loading ? 'Consultando contas e cotas...' : `${accounts.length} conta${accounts.length === 1 ? '' : 's'} - arraste pelo puxador para reordenar`}
+                  {loading
+                    ? 'Consultando contas e cotas...'
+                    : activeAccount
+                      ? `${accounts.length} conta${accounts.length === 1 ? '' : 's'} - ativa agora: ${activeAccount.label}`
+                      : `${accounts.length} conta${accounts.length === 1 ? '' : 's'} - arraste pelo puxador para reordenar`}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -168,6 +272,7 @@ export function Home() {
                     key={account.id}
                     account={account}
                     isActive={account.id === activeAccountId}
+                    isSwitching={account.id === switchEvent?.toId}
                     isFirst={index === 0}
                     isLast={index === accounts.length - 1}
                     refreshing={refreshing}
@@ -190,6 +295,16 @@ export function Home() {
 
       <LoginDialog open={loginOpen} onOpenChange={setLoginOpen} onSuccess={refreshAccounts} />
       <LogsDialog open={logsOpen} onOpenChange={setLogsOpen} />
+      {settings && (
+        <SettingsDialog
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          settings={settings}
+          onSaveGlobalThinking={async (value) => {
+            await settingsState.setGlobalThinking(value)
+          }}
+        />
+      )}
       {settings && (
         <APISettingsDialog
           open={apiSettingsOpen}

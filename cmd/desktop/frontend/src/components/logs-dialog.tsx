@@ -24,6 +24,10 @@ const levelStyle = {
   error: { icon: XCircle, className: 'text-red-400 bg-red-500/10' },
 }
 
+function isAccountSwitchEvent(event: string) {
+  return event === 'account.rotated' || event === 'account.activated'
+}
+
 export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -92,8 +96,16 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
                 const Icon = style.icon
                 const diagnostic = parseDiagnostic(entry.message)
                 const entryText = formatLogEntry(entry)
+                const switchEvent = isAccountSwitchEvent(entry.event)
                 return (
-                  <div key={entry.id} className="flex gap-3 rounded-md border border-border/50 bg-background/35 p-3">
+                  <div
+                    key={entry.id}
+                    className={`flex gap-3 rounded-md border p-3 ${
+                      switchEvent
+                        ? 'border-sky-400/35 bg-sky-500/[0.06] shadow-[0_10px_30px_rgba(14,165,233,0.08)]'
+                        : 'border-border/50 bg-background/35'
+                    }`}
+                  >
                     <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded ${style.className}`}>
                       <Icon className="h-3.5 w-3.5" />
                     </div>
@@ -104,6 +116,11 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
                             {new Date(entry.timestamp).toLocaleString('pt-BR')}
                           </span>
                           <span className="font-mono text-[10px] uppercase text-muted-foreground">{entry.event}</span>
+                          {switchEvent && (
+                            <span className="rounded-full border border-sky-400/25 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-300">
+                              Troca de conta
+                            </span>
+                          )}
                         </div>
                         <Button
                           variant="ghost"

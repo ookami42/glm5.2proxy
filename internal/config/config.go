@@ -76,7 +76,7 @@ func Load() Config {
 		CredentialSecret:       os.Getenv("ZCODE_PROXY_CREDENTIAL_SECRET"),
 		CaptchaEnabled:         enabled("ZCODE_CAPTCHA_BRIDGE", true),
 		CaptchaTimeout:         envDurationMS("ZCODE_CAPTCHA_BRIDGE_TIMEOUT_MS", 120000),
-		CaptchaPreferredClient: env("ZCODE_CAPTCHA_CLIENT_PREFERENCE", "headless-browser"),
+		CaptchaPreferredClient: env("ZCODE_CAPTCHA_CLIENT_PREFERENCE", "standalone-browser"),
 		HeadlessEnabled:        enabled("ZCODE_CAPTCHA_HEADLESS", true),
 		HeadlessExecutable:     os.Getenv("ZCODE_CAPTCHA_HEADLESS_EXECUTABLE"),
 		HeadlessProfileDir:     env("ZCODE_CAPTCHA_HEADLESS_PROFILE_DIR", filepath.Join(dataDir, "captcha-headless-profile")),
