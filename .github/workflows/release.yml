@@ -43,14 +43,14 @@ jobs:
           mkdir -p "${PKG}/usr/share/applications"
           mkdir -p "${PKG}/usr/share/icons/hicolor/256x256/apps"
 
-          cat > "${PKG}/DEBIAN/control" <<EOF
-Package: glm5.2proxy
-Version: ${VERSION}
-Architecture: amd64
-Maintainer: maicon2
-Description: GLM 5.2 Proxy - Desktop application
-Depends: libgtk-3-0, libwebkit2gtk-4.1-0, libappindicator3-1, librsvg2-2
-EOF
+          printf '%s\n' \
+            'Package: glm5.2proxy' \
+            "Version: ${VERSION}" \
+            'Architecture: amd64' \
+            'Maintainer: maicon2' \
+            'Description: GLM 5.2 Proxy - Desktop application' \
+            'Depends: libgtk-3-0, libwebkit2gtk-4.1-0, libappindicator3-1, librsvg2-2' \
+            > "${PKG}/DEBIAN/control"
 
           cp build/bin/glm5.2proxy "${PKG}/usr/local/bin/"
           cp build/glm5.2proxy.desktop "${PKG}/usr/share/applications/"
