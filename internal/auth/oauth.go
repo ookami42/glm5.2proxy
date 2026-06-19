@@ -63,7 +63,8 @@ func (s *Service) Start(ctx context.Context) (Flow, error) {
 		value := time.Unix(payload.Data.ExpiresAt, 0).UTC()
 		expires = &value
 	}
-	flow := Flow{FlowID: payload.Data.FlowID, AuthorizeURL: payload.Data.AuthorizeURL, ExpiresAt: expires, PollIntervalSec: payload.Data.PollIntervalSec, Status: "pending", pollToken: first(payload.Data.PollToken, pollToken)}
+	authorizeURL := strings.Replace(payload.Data.AuthorizeURL, "/api/oauth/authorize", "/auth/oauth/authorize", 1)
+	flow := Flow{FlowID: payload.Data.FlowID, AuthorizeURL: authorizeURL, ExpiresAt: expires, PollIntervalSec: payload.Data.PollIntervalSec, Status: "pending", pollToken: first(payload.Data.PollToken, pollToken)}
 	if flow.PollIntervalSec == 0 {
 		flow.PollIntervalSec = 2
 	}
