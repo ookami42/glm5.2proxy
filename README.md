@@ -1,14 +1,127 @@
 # glm5.2proxy
 
-Proxy local em Go para usar contas Z.ai/ZCode Start Plan como uma API
-OpenAI-compatible. O projeto tem dois modos de uso:
+Proxy local em Go para usar contas Z.ai/ZCode Start Plan de dois jeitos:
 
-- app desktop Wails com painel React para contas, cotas, fila, logs, porta e API keys;
+- como um gerenciador de contas para o proprio app ZCode, com troca de conta e refresh live dentro do cliente deles;
+- como uma API OpenAI-compatible local para usar em Kilo Code, Roo Code, Open WebUI, scripts e outros clientes externos.
+
+O projeto tem duas superficies:
+
+- app desktop Wails com painel React para contas, cotas, fila, logs, porta, API keys e integracao com ZCode;
 - servidor headless para rodar apenas a API/proxy.
 
-O app expoe `/v1/chat/completions` e `/v1/models` para clientes compativeis com
-OpenAI, traduz as chamadas para o formato usado pelo ZCode e faz rotacao por
-conta/modelo quando a cota esgota.
+## Novo sistema de integracao com o ZCode
+
+O projeto agora consegue sincronizar as contas salvas no proxy diretamente para
+o ambiente interno do ZCode.
+
+Na pratica:
+
+- voce adiciona e organiza as contas no painel do `glm5.2proxy`;
+- quando ativa uma conta no proxy, ele tambem pode aplicar essa mesma conta no ZCode;
+- se o bridge estiver disponivel, o ZCode recarrega a propria janela e passa a usar a conta nova sem voce precisar trocar manualmente no app deles;
+- o painel mostra os eventos dessa sincronizacao e dos refreshes live.
+
+Isso resolve o problema de manter dois pools separados:
+
+- um pool de contas no proxy para clientes OpenAI-compatible;
+- e outro estado manual dentro do ZCode.
+
+Agora o proxy pode ser a origem de verdade das contas, e o ZCode pode seguir o
+que foi ativado nele.
+
+## Dois modos de uso
+
+### 1. Usar o proxy como API OpenAI-compatible
+
+Nesse modo, o app expoe:
+
+- `POST /v1/chat/completions`
+- `GET /v1/models`
+
+Ele traduz as chamadas para o formato usado pelo ZCode/GLM e faz rotacao por
+conta/modelo quando a cota esgota ou quando a conta atual deixa de ser viavel
+para a request.
+
+Esse modo serve para:
+
+- Kilo Code
+- Roo Code
+- Open WebUI
+- apps/scripts que falam com API estilo OpenAI
+
+### 2. Usar o proxy para rotacionar contas diretamente no app ZCode
+
+Nesse modo, o proxy nao serve apenas como API externa. Ele tambem conversa com
+o ambiente local do ZCode instalado na maquina.
+
+Quando voce usa `Aplicar no ZCode` ou ativa uma conta pelo fluxo integrado:
+
+- o proxy grava a conta nos arquivos internos do ZCode;
+- garante que o bridge do renderer esteja instalado;
+- enfileira um refresh live;
+- o ZCode recarrega a janela e atualiza o perfil visual e o runtime da conta.
+
+Em outras palavras: o proxy pode comandar qual conta o ZCode vai usar.
+
+## Como funciona o bridge do ZCode
+
+O ZCode nao expoe publicamente um endpoint HTTP para trocar a conta live. O
+refresh interno fica atras de um RPC privado via Electron `MessagePort`.
+
+Por causa disso, o `glm5.2proxy` instala um bridge pequeno no renderer do
+ZCode.
+
+Esse bridge:
+
+- faz polling em `GET /api/admin/zcode/bridge/next`;
+- recebe comandos de refresh enfileirados pelo proxy;
+- chama internamente `modelProviderService.refreshCodingPlanApiKey(...)`;
+- confirma o resultado em `POST /api/admin/zcode/bridge/ack`;
+- recarrega a janela do ZCode para o perfil visual sair do estado antigo.
+
+### O que e injetado
+
+O projeto inclui o script:
+
+```text
+scripts/patch-zcode-live-refresh.ps1
+```
+
+Esse script:
+
+- localiza o `app.asar` do ZCode;
+- cria backup automatico do arquivo original;
+- extrai o bundle do renderer;
+- injeta o snippet do bridge;
+- repacka o `app.asar`;
+- permite restaurar a partir do backup.
+
+### Isso e automatico?
+
+Sim. No fluxo novo, o proprio app tenta fazer isso automaticamente quando:
+
+- detecta que o ZCode esta instalado; e
+- precisa aplicar uma conta no ZCode; e
+- o bridge `v2` ainda nao esta instalado.
+
+Se necessario, ele reinicia o ZCode uma vez para carregar o bridge novo. Depois
+disso, as proximas trocas podem acontecer pelo fluxo live.
+
+### Transparencia e seguranca
+
+Esse comportamento altera arquivos locais do ZCode instalado na maquina. Por
+isso, seja claro ao distribuir o projeto:
+
+- o patch e local, nao remoto;
+- um backup do `app.asar` e criado automaticamente;
+- o app nao recomenda desativar antivirus;
+- se houver falso positivo, o correto e adicionar excecao apenas para a pasta
+  ou executavel confiavel do projeto.
+
+Alguns antivirus podem estranhar esse comportamento porque ele modifica o
+ambiente local de outro app Electron. Isso nao e motivo para orientar o usuario
+a desligar a protecao do sistema.
 
 ## Funcionalidades
 

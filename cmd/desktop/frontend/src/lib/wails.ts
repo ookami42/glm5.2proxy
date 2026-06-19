@@ -1,19 +1,27 @@
+import { OpenExternalURL } from '../../wailsjs/go/main/Desktop'
 import { BrowserOpenURL } from '../../wailsjs/runtime/runtime'
 
-export function openExternalURL(url: string): void {
+export async function openExternalURL(url: string): Promise<void> {
   if (!/^https?:\/\//i.test(url)) {
-    throw new Error('A URL de autenticação retornada é inválida')
+    throw new Error('A URL de autenticacao retornada e invalida')
   }
 
   try {
     BrowserOpenURL(url)
     return
   } catch {
-    // Browser preview does not expose the Wails runtime.
+    // Wails runtime unavailable.
+  }
+
+  try {
+    await OpenExternalURL(url)
+    return
+  } catch {
+    // Browser preview does not expose Go bindings.
   }
 
   const opened = window.open(url, '_blank', 'noopener,noreferrer')
   if (!opened) {
-    throw new Error('Não foi possível abrir o navegador para autenticação')
+    throw new Error('Nao foi possivel abrir o navegador para autenticacao')
   }
 }

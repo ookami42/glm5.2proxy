@@ -69,21 +69,23 @@ $proxyUrl = $ProxyBaseUrl.TrimEnd("/")
 $snippet = @"
 ;(()=>{if(globalThis.__GLM52_PROXY_BRIDGE__)return;globalThis.__GLM52_PROXY_BRIDGE__=!0;globalThis.__GLM52_PROXY_BRIDGE_RELOAD_V2__=!0;const u="$proxyUrl/api/admin/zcode/bridge";async function a(c,o,m){try{await fetch(u+"/ack",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({commandId:c,ok:o,message:m||""})})}catch{}}function l(c){if(c&&c.reloadRenderer===!1)return;setTimeout(()=>{try{location.reload()}catch{}},250)}async function p(){let c=null;try{let r=await fetch(u+"/next",{cache:"no-store"});if(!r.ok)return;let j=await r.json();c=j&&j.data&&j.data.command;if(!c||!c.commandId)return;if(c.action==="refreshCodingPlanApiKey"){let ids=c.providerIds||["builtin:zai-start-plan","builtin:zai-coding-plan"];await Promise.all(ids.map(id=>n.modelProviderService.refreshCodingPlanApiKey(id)));await n.modelProviderService.getAll();await a(c.commandId,!0,"ZCode bridge aplicou refreshCodingPlanApiKey e recarregou renderer");l(c)}}catch(e){if(c&&c.commandId)await a(c.commandId,!1,e&&e.message?e.message:String(e))}}setInterval(p,1500);setTimeout(p,500)})();
 "@
-if ($source.Contains($versionMarker)) {
-  Write-Host "Patch v2 ja estava instalado em $($renderer.FullName)."
-} elseif ($source.Contains($marker)) {
+if ($source.Contains($marker)) {
   $oldSnippetStart = $source.IndexOf(";(()=>{if(globalThis.__GLM52_PROXY_BRIDGE__)return;")
   $oldSnippetEnd = -1
   if ($oldSnippetStart -ge 0) {
     $oldSnippetEnd = $source.IndexOf("setTimeout(p,500)})();", $oldSnippetStart)
   }
   if ($oldSnippetStart -lt 0 -or $oldSnippetEnd -lt 0) {
-    throw "Patch antigo encontrado, mas nao foi possivel localizar o bloco para atualizar."
+    throw "Patch encontrado, mas nao foi possivel localizar o bloco para atualizar."
   }
   $oldSnippetEnd += "setTimeout(p,500)})();".Length
   $patched = $source.Substring(0, $oldSnippetStart) + $snippet + $source.Substring($oldSnippetEnd)
   Set-Content -LiteralPath $renderer.FullName -Value $patched -NoNewline
-  Write-Host "Patch antigo atualizado para v2 em $($renderer.FullName)."
+  if ($source.Contains($versionMarker)) {
+    Write-Host "Patch v2 atualizado em $($renderer.FullName)."
+  } else {
+    Write-Host "Patch antigo atualizado para v2 em $($renderer.FullName)."
+  }
 } else {
   $anchor = 'let n=wUt(t);$9=n,moe(n);'
   if (-not $source.Contains($anchor)) {

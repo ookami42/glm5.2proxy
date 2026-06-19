@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,7 +37,15 @@ type Service struct {
 }
 
 func New(cfg config.Config, store *accounts.Store) *Service {
-	return &Service{cfg: cfg, accounts: store, client: &http.Client{Timeout: 15 * time.Second}, flows: map[string]*Flow{}}
+	// The OAuth backend (zcode.z.ai) closes idle connections aggressively, so
+	// reusing a pooled connection on the second login stalls until the socket
+	// times out or gets reset. Disable keep-alives to force a fresh connection
+	// on every OAuth request, which keeps repeated logins snappy.
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		IdleConnTimeout:   30 * time.Second,
+	}
+	return &Service{cfg: cfg, accounts: store, client: &http.Client{Timeout: 15 * time.Second, Transport: transport}, flows: map[string]*Flow{}}
 }
 
 func (s *Service) Start(ctx context.Context) (Flow, error) {
@@ -55,15 +64,15 @@ func (s *Service) Start(ctx context.Context) (Flow, error) {
 	if err := s.request(ctx, http.MethodPost, "/oauth/cli/init", pollToken, map[string]any{"provider": s.cfg.OAuthProvider}, &payload); err != nil {
 		return Flow{}, err
 	}
-	if payload.Data.FlowID == "" || payload.Data.AuthorizeURL == "" {
-		return Flow{}, errors.New("OAuth init response is missing flow_id or authorize_url")
+	if payload.Data.FlowID == "" || payload.Data.AuthorizeURL == "" || payload.Data.PollToken == "" {
+		return Flow{}, errors.New("OAuth init response is missing flow_id, poll_token, or authorize_url")
 	}
 	var expires *time.Time
 	if payload.Data.ExpiresAt > 0 {
 		value := time.Unix(payload.Data.ExpiresAt, 0).UTC()
 		expires = &value
 	}
-	flow := Flow{FlowID: payload.Data.FlowID, AuthorizeURL: payload.Data.AuthorizeURL, ExpiresAt: expires, PollIntervalSec: payload.Data.PollIntervalSec, Status: "pending", pollToken: first(payload.Data.PollToken, pollToken)}
+	flow := Flow{FlowID: payload.Data.FlowID, AuthorizeURL: payload.Data.AuthorizeURL, ExpiresAt: expires, PollIntervalSec: payload.Data.PollIntervalSec, Status: "pending", pollToken: pollToken}
 	if flow.PollIntervalSec == 0 {
 		flow.PollIntervalSec = 2
 	}
@@ -148,18 +157,27 @@ func (s *Service) request(ctx context.Context, method, path, bearer string, body
 		return err
 	}
 	defer response.Body.Close()
-	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
-		return err
+	rawBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("OAuth request failed reading HTTP %s response: %w", response.Status, err)
 	}
-	raw, _ := json.Marshal(target)
 	var status struct {
 		Code    int    `json:"code"`
 		Msg     string `json:"msg"`
 		Message string `json:"message"`
 	}
-	_ = json.Unmarshal(raw, &status)
+	if len(bytes.TrimSpace(rawBody)) > 0 {
+		_ = json.Unmarshal(rawBody, &status)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || status.Code != 0 {
-		return fmt.Errorf("OAuth request failed: HTTP %d %s", response.StatusCode, first(status.Msg, status.Message))
+		message := first(status.Msg, status.Message, strings.TrimSpace(string(rawBody)), response.Status)
+		return fmt.Errorf("OAuth request failed: HTTP %d %s", response.StatusCode, message)
+	}
+	if len(bytes.TrimSpace(rawBody)) == 0 {
+		return fmt.Errorf("OAuth request returned an empty HTTP %d response", response.StatusCode)
+	}
+	if err := json.Unmarshal(rawBody, target); err != nil {
+		return fmt.Errorf("OAuth request returned invalid JSON from HTTP %d: %w", response.StatusCode, err)
 	}
 	return nil
 }

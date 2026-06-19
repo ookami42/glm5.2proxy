@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"glm5.2proxy/internal/accountpool"
@@ -17,12 +18,18 @@ import (
 
 func TestOAuthQuotaAndAccountRotation(t *testing.T) {
 	var chatToken string
+	var initAuth string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/oauth/cli/init":
-			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"flow_id": "flow-1", "authorize_url": "https://example.test/login", "poll_interval_sec": 1}})
+			initAuth = r.Header.Get("Authorization")
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"flow_id": "flow-1", "poll_token": "server-returned-token", "authorize_url": "https://example.test/login", "expires_at": 4102444800, "poll_interval_sec": 1}})
 		case r.URL.Path == "/oauth/cli/poll/flow-1":
+			if r.Header.Get("Authorization") != initAuth {
+				http.Error(w, `{"code":3001,"msg":"wrong poll token"}`, http.StatusUnauthorized)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"status": "ready", "token": "token-one", "user": map[string]any{"user_id": "one", "email": "one@example.test"}, "zai": map[string]any{"access_token": "access-one"}}})
 		case r.URL.Path == "/billing/current":
 			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"plans": []any{}}})
@@ -65,6 +72,27 @@ func TestOAuthQuotaAndAccountRotation(t *testing.T) {
 	}
 	if store.Active().ID != "two" || chatToken != "Bearer token-two" {
 		t.Fatalf("wrong active account/token: active=%+v token=%s", store.Active(), chatToken)
+	}
+}
+
+func TestOAuthStartReportsEmptyHTTPStatusInsteadOfEOF(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer mock.Close()
+
+	cfg := testConfig(t)
+	cfg.OAuthBaseURL = mock.URL
+	store, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	oauth := auth.New(cfg, store)
+
+	_, err := oauth.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected OAuth start error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "HTTP 429") || strings.Contains(message, "EOF") {
+		t.Fatalf("unexpected OAuth error message: %q", message)
 	}
 }
 

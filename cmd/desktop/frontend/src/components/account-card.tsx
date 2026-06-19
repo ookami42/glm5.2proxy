@@ -29,9 +29,12 @@ interface AccountCardProps {
   isFirst: boolean
   isLast: boolean
   refreshing: boolean
+  activatePending: boolean
+  zcodePending: boolean
+  actionsDisabled: boolean
   globalThinking: ThinkingSettings | null
   accountThinking: ThinkingSettings | null
-  onActivate: () => void
+  onActivate: () => Promise<void>
   onApplyZCode: () => Promise<void>
   onMoveUp: () => void
   onMoveDown: () => void
@@ -291,6 +294,9 @@ export function AccountCard({
   isFirst,
   isLast,
   refreshing,
+  activatePending,
+  zcodePending,
+  actionsDisabled,
   globalThinking,
   accountThinking,
   onActivate,
@@ -307,29 +313,31 @@ export function AccountCard({
   const dragControls = useDragControls()
   const displayName = account.user.name || account.label
   const email = account.user.email || account.user.id || account.id
-  const [applyingZCode, setApplyingZCode] = useState(false)
   const [zcodeMessage, setZCodeMessage] = useState<string | null>(null)
-  const effectiveZCodeStatus = applyingZCode ? 'syncing' : zcodeSyncStatus
+  const effectiveZCodeStatus = zcodePending ? 'syncing' : zcodeSyncStatus
   const effectiveZCodeMessage = zcodeMessage ?? zcodeSyncMessage
+
+  const activateAccount = async () => {
+    if (isActive || activatePending || actionsDisabled) return
+    setZCodeMessage(null)
+    try {
+      await onActivate()
+    } catch (err) {
+      setZCodeMessage(err instanceof Error ? err.message : 'Nao foi possivel ativar conta')
+    }
+  }
 
   const applyZCode = async () => {
     if (!account.hasZcodeJwtToken) {
       setZCodeMessage('Essa conta antiga nao tem JWT salvo; faca login novamente nela para conseguir migrar para o ZCode.')
       return
     }
-    setApplyingZCode(true)
     setZCodeMessage(null)
     try {
       await onApplyZCode()
-      setZCodeMessage(
-        account.hasZaiAccessToken
-          ? 'Aplicada no ZCode com JWT e sessao OAuth. Com o bridge v2 instalado, a janela do ZCode recarrega para mostrar o perfil certo.'
-          : 'Aplicada no ZCode usando JWT antigo. Se o ZCode pedir login, essa conta precisa ser recadastrada.'
-      )
+      setZCodeMessage(null)
     } catch (err) {
       setZCodeMessage(err instanceof Error ? err.message : 'Nao foi possivel aplicar no ZCode')
-    } finally {
-      setApplyingZCode(false)
     }
   }
 
@@ -432,20 +440,20 @@ export function AccountCard({
                 <Button
                   variant={isActive ? 'secondary' : 'outline'}
                   size="sm"
-                  disabled={isActive}
-                  onClick={onActivate}
+                  disabled={isActive || activatePending || actionsDisabled}
+                  onClick={() => { void activateAccount() }}
                 >
-                  {isActive ? 'Conta ativa' : 'Usar agora'}
+                  {activatePending ? 'Ativando...' : isActive ? 'Conta ativa' : 'Usar agora'}
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={applyingZCode || !account.hasZcodeJwtToken}
-                  onClick={applyZCode}
+                  disabled={zcodePending || actionsDisabled || !account.hasZcodeJwtToken}
+                  onClick={() => { void applyZCode() }}
                   title={account.hasZcodeJwtToken ? 'Grava esta conta no ambiente interno do app ZCode' : 'Conta antiga sem JWT salvo'}
                 >
                   <SquareCode className="h-3.5 w-3.5" />
-                  {applyingZCode ? 'Aplicando...' : 'Aplicar no ZCode'}
+                  {zcodePending ? 'Aplicando...' : 'Aplicar no ZCode'}
                 </Button>
               </div>
             </div>
@@ -491,14 +499,25 @@ export function AccountCard({
             />
 
             {account.quota ? (
-              <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                {account.quota.balances.map((balance) => (
-                  <ModelQuota key={balance.id || balance.model} balance={balance} />
-                ))}
+              <div className="mt-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {account.quota.balances.map((balance) => (
+                    <ModelQuota key={balance.id || balance.model} balance={balance} />
+                  ))}
+                </div>
+                {account.quotaLoading && (
+                  <p className="mt-2 text-[11px] text-muted-foreground">Atualizando cota...</p>
+                )}
               </div>
+            ) : account.quotaLoading ? (
+              <div className="mt-4 h-[74px] animate-pulse rounded-md bg-muted/60" />
             ) : account.quotaError ? (
               <div className="mt-4 rounded-md border border-red-500/25 bg-red-500/5 px-3 py-2 text-xs text-red-400">
                 Nao foi possivel consultar a cota: {account.quotaError.message}
+              </div>
+            ) : account.quotaSkipped ? (
+              <div className="mt-4 rounded-md border border-border/60 bg-background/35 px-3 py-2 text-xs text-muted-foreground">
+                Cota nao carregada nesta atualizacao.
               </div>
             ) : (
               <div className="mt-4 h-[74px] animate-pulse rounded-md bg-muted/60" />

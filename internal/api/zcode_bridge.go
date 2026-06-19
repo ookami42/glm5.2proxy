@@ -102,6 +102,31 @@ func (b *zcodeBridge) Ack(commandID string, ok bool, message string) bool {
 	return true
 }
 
+func (b *zcodeBridge) FallbackRestarted(commandID, message string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.pending == nil || b.pending.CommandID != commandID {
+		return false
+	}
+	b.last = zcodeBridgeStatus{
+		State:       "restarted",
+		CommandID:   b.pending.CommandID,
+		AccountID:   b.pending.AccountID,
+		Account:     b.pending.Account,
+		Message:     message,
+		UpdatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		BridgePatch: "requires-zcode-renderer-patch",
+	}
+	b.pending = nil
+	return true
+}
+
+func (b *zcodeBridge) Pending(commandID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pending != nil && b.pending.CommandID == commandID
+}
+
 func (b *zcodeBridge) Status() zcodeBridgeStatus {
 	b.mu.Lock()
 	defer b.mu.Unlock()

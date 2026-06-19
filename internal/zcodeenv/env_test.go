@@ -93,3 +93,60 @@ func TestWriteCredentialsAllowsJWTOnlyAccount(t *testing.T) {
 		t.Fatal("expected jwt credential")
 	}
 }
+
+func TestDetectBridgeProxyBaseURL(t *testing.T) {
+	raw := []byte(`;(()=>{if(globalThis.__GLM52_PROXY_BRIDGE__)return;const u="http://127.0.0.1:34115/api/admin/zcode/bridge";})();`)
+	got := detectBridgeProxyBaseURL(raw)
+	if got != "http://127.0.0.1:34115" {
+		t.Fatalf("unexpected bridge proxy base URL: %q", got)
+	}
+}
+
+func TestUpdateConfigWritesBothZCodeCodingProviders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "modelProviders": {
+    "builtin:zai-start-plan": {
+      "enabled": false,
+      "options": {
+        "baseURL": "https://custom.example.test/anthropic",
+        "other": "preserved"
+      }
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := updateConfig(path, "jwt-token"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	providers := saved["modelProviders"].(map[string]any)
+	for _, providerID := range codingPlanProviderIDs {
+		provider := providers[providerID].(map[string]any)
+		if provider["enabled"] != true {
+			t.Fatalf("%s was not enabled", providerID)
+		}
+		options := provider["options"].(map[string]any)
+		if options["apiKey"] != "jwt-token" {
+			t.Fatalf("%s apiKey was not updated", providerID)
+		}
+		if options["baseURL"] == "" {
+			t.Fatalf("%s baseURL was not set", providerID)
+		}
+	}
+	startOptions := providers["builtin:zai-start-plan"].(map[string]any)["options"].(map[string]any)
+	if startOptions["other"] != "preserved" {
+		t.Fatal("existing provider options were not preserved")
+	}
+	if startOptions["baseURL"] != "https://custom.example.test/anthropic" {
+		t.Fatal("existing provider baseURL was overwritten")
+	}
+}

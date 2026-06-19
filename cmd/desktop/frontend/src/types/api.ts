@@ -28,6 +28,8 @@ export interface Account {
   }
   quota: QuotaSnapshot | null
   quotaError: { message: string; type: string } | null
+  quotaSkipped?: boolean
+  quotaLoading?: boolean
   hasZcodeJwtToken: boolean
   hasZaiAccessToken: boolean
   tokenExpiresAt: string | null

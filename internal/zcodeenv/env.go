@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"glm5.2proxy/internal/accounts"
@@ -43,6 +44,7 @@ type Environment struct {
 	LiveRefreshReason   string       `json:"liveRefreshReason,omitempty"`
 	BridgeInstalled     bool         `json:"bridgeInstalled"`
 	BridgeVersion       string       `json:"bridgeVersion,omitempty"`
+	BridgeProxyBaseURL  string       `json:"bridgeProxyBaseUrl,omitempty"`
 	BridgeScriptPath    string       `json:"bridgeScriptPath,omitempty"`
 	Warnings            []string     `json:"warnings,omitempty"`
 }
@@ -87,6 +89,18 @@ const (
 	bridgeMarkerV1 = "__GLM52_PROXY_BRIDGE__"
 	bridgeMarkerV2 = "__GLM52_PROXY_BRIDGE_RELOAD_V2__"
 )
+
+var codingPlanProviderIDs = []string{"builtin:zai-start-plan", "builtin:zai-coding-plan"}
+
+var bridgeDetectionCache struct {
+	mu        sync.Mutex
+	path      string
+	size      int64
+	modTime   time.Time
+	installed bool
+	version   string
+	proxyURL  string
+}
 
 func Detect() Environment {
 	home, _ := os.UserHomeDir()
@@ -137,9 +151,10 @@ func Detect() Environment {
 		}
 	}
 	env.BridgeScriptPath = bridgeScriptPath()
-	if installed, version, err := detectBridge(env); err == nil {
+	if installed, version, proxyBaseURL, err := detectBridge(env); err == nil {
 		env.BridgeInstalled = installed
 		env.BridgeVersion = version
+		env.BridgeProxyBaseURL = proxyBaseURL
 		env.LiveRefreshPossible = installed
 		if installed {
 			env.RestartRecommended = false
@@ -156,20 +171,43 @@ func Available(env Environment) bool {
 	return env.InstallPath != "" || env.AppServerScript != "" || env.CredentialsPresent || env.ConfigPresent || len(env.RunningProcesses) > 0
 }
 
+func Restart(env Environment) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("reinicio automatico do ZCode so esta implementado no Windows")
+	}
+	if env.InstallPath == "" {
+		return errors.New("executavel do ZCode nao foi detectado")
+	}
+	if len(env.RunningProcesses) > 0 {
+		command := exec.Command("powershell", "-NoProfile", "-Command", "Get-Process -Name 'ZCode' -ErrorAction SilentlyContinue | Stop-Process -Force")
+		if output, err := command.CombinedOutput(); err != nil {
+			text := strings.TrimSpace(string(output))
+			if text != "" {
+				return fmt.Errorf("falha ao fechar ZCode: %s", text)
+			}
+			return fmt.Errorf("falha ao fechar ZCode: %w", err)
+		}
+		time.Sleep(1200 * time.Millisecond)
+	}
+	if err := exec.Command(env.InstallPath).Start(); err != nil {
+		return fmt.Errorf("falha ao reabrir ZCode: %w", err)
+	}
+	return nil
+}
+
 func ApplyAccount(account accounts.Account) (ApplyResult, error) {
 	return ApplyAccountWithBridge(account, "")
 }
 
 func ApplyAccountWithBridge(account accounts.Account, proxyBaseURL string) (ApplyResult, error) {
 	env := Detect()
+	return ApplyAccountWithBridgeInEnvironment(env, account, proxyBaseURL)
+}
+
+func ApplyAccountWithBridgeInEnvironment(env Environment, account accounts.Account, proxyBaseURL string) (ApplyResult, error) {
 	if account.ZCodeJWTToken == "" {
 		return ApplyResult{}, errors.New("conta sem zcodeJwtToken salvo")
 	}
-	patchResult, err := ensureBridgeInstalled(env, proxyBaseURL)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	env = Detect()
 	if err := os.MkdirAll(env.DataDir, 0o700); err != nil {
 		return ApplyResult{}, err
 	}
@@ -182,7 +220,27 @@ func ApplyAccountWithBridge(account accounts.Account, proxyBaseURL string) (Appl
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	env = Detect()
+	env.CredentialsPresent = true
+	env.ConfigPresent = true
+	env.CurrentUser = &CurrentUser{
+		ID:    first(account.User.UserID, account.User.ID),
+		Email: account.User.Email,
+		Name:  first(account.User.Name, account.User.Nickname),
+	}
+	patchResult, err := ensureBridgeInstalled(env, proxyBaseURL)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if patchResult.Updated {
+		env = Detect()
+	}
+	env.CredentialsPresent = true
+	env.ConfigPresent = true
+	env.CurrentUser = &CurrentUser{
+		ID:    first(account.User.UserID, account.User.ID),
+		Email: account.User.Email,
+		Name:  first(account.User.Name, account.User.Nickname),
+	}
 	return ApplyResult{
 		Environment:         env,
 		Account:             accounts.Sanitize(account),
@@ -205,7 +263,8 @@ func ensureBridgeInstalled(env Environment, proxyBaseURL string) (BridgePatchRes
 	if env.InstallPath == "" {
 		return BridgePatchResult{}, nil
 	}
-	if env.BridgeInstalled && env.BridgeVersion == "v2" {
+	expectedProxyBaseURL := effectiveProxyBaseURL(proxyBaseURL)
+	if env.BridgeInstalled && env.BridgeVersion == "v2" && sameBridgeProxy(env.BridgeProxyBaseURL, expectedProxyBaseURL) {
 		return BridgePatchResult{
 			Installed: true,
 			Version:   env.BridgeVersion,
@@ -245,6 +304,9 @@ func ensureBridgeInstalled(env Environment, proxyBaseURL string) (BridgePatchRes
 	if !verifiedEnv.BridgeInstalled || verifiedEnv.BridgeVersion != "v2" {
 		return BridgePatchResult{}, errors.New("o patch terminou, mas o bridge v2 nao foi detectado no ZCode")
 	}
+	if !sameBridgeProxy(verifiedEnv.BridgeProxyBaseURL, expectedProxyBaseURL) {
+		return BridgePatchResult{}, fmt.Errorf("o patch terminou, mas o bridge aponta para %q em vez de %q", verifiedEnv.BridgeProxyBaseURL, expectedProxyBaseURL)
+	}
 	message := strings.TrimSpace(string(output))
 	if message == "" {
 		message = "Bridge v2 do ZCode instalado automaticamente."
@@ -258,23 +320,64 @@ func ensureBridgeInstalled(env Environment, proxyBaseURL string) (BridgePatchRes
 	}, nil
 }
 
-func detectBridge(env Environment) (bool, string, error) {
+func detectBridge(env Environment) (bool, string, string, error) {
 	if env.InstallPath == "" {
-		return false, "", nil
+		return false, "", "", nil
 	}
 	asarPath := filepath.Join(filepath.Dir(env.InstallPath), "resources", "app.asar")
+	info, err := os.Stat(asarPath)
+	if err != nil {
+		return false, "", "", err
+	}
+	bridgeDetectionCache.mu.Lock()
+	if bridgeDetectionCache.path == asarPath && bridgeDetectionCache.size == info.Size() && bridgeDetectionCache.modTime.Equal(info.ModTime()) {
+		installed := bridgeDetectionCache.installed
+		version := bridgeDetectionCache.version
+		proxyURL := bridgeDetectionCache.proxyURL
+		bridgeDetectionCache.mu.Unlock()
+		return installed, version, proxyURL, nil
+	}
+	bridgeDetectionCache.mu.Unlock()
 	raw, err := os.ReadFile(asarPath)
 	if err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
+	proxyBaseURL := detectBridgeProxyBaseURL(raw)
+	installed := false
+	version := ""
 	switch {
 	case bytes.Contains(raw, []byte(bridgeMarkerV2)):
-		return true, "v2", nil
+		installed = true
+		version = "v2"
 	case bytes.Contains(raw, []byte(bridgeMarkerV1)):
-		return true, "v1", nil
-	default:
-		return false, "", nil
+		installed = true
+		version = "v1"
 	}
+	bridgeDetectionCache.mu.Lock()
+	bridgeDetectionCache.path = asarPath
+	bridgeDetectionCache.size = info.Size()
+	bridgeDetectionCache.modTime = info.ModTime()
+	bridgeDetectionCache.installed = installed
+	bridgeDetectionCache.version = version
+	bridgeDetectionCache.proxyURL = proxyBaseURL
+	bridgeDetectionCache.mu.Unlock()
+	return installed, version, proxyBaseURL, nil
+}
+
+func detectBridgeProxyBaseURL(raw []byte) string {
+	needle := []byte("/api/admin/zcode/bridge")
+	index := bytes.Index(raw, needle)
+	if index < 0 {
+		return ""
+	}
+	start := index - 1
+	for start >= 0 && raw[start] != '"' && raw[start] != '\'' && raw[start] != '`' {
+		start--
+	}
+	if start < 0 {
+		return ""
+	}
+	return string(raw[start+1 : index])
 }
 
 func bridgeScriptPath() string {
@@ -305,6 +408,10 @@ func effectiveProxyBaseURL(value string) string {
 		return "http://127.0.0.1:3005"
 	}
 	return strings.TrimRight(trimmed, "/")
+}
+
+func sameBridgeProxy(left, right string) bool {
+	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(left), "/"), strings.TrimRight(strings.TrimSpace(right), "/"))
 }
 
 func compactLines(value string) string {
@@ -375,20 +482,22 @@ func updateConfig(path, jwt string) (bool, error) {
 		providers = map[string]any{}
 		config["modelProviders"] = providers
 	}
-	provider, _ := providers["builtin:zai-start-plan"].(map[string]any)
-	if provider == nil {
-		provider = map[string]any{}
-		providers["builtin:zai-start-plan"] = provider
-	}
-	provider["enabled"] = true
-	options, _ := provider["options"].(map[string]any)
-	if options == nil {
-		options = map[string]any{}
-		provider["options"] = options
-	}
-	options["apiKey"] = jwt
-	if _, ok := options["baseURL"]; !ok {
-		options["baseURL"] = "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+	for _, providerID := range codingPlanProviderIDs {
+		provider, _ := providers[providerID].(map[string]any)
+		if provider == nil {
+			provider = map[string]any{}
+			providers[providerID] = provider
+		}
+		provider["enabled"] = true
+		options, _ := provider["options"].(map[string]any)
+		if options == nil {
+			options = map[string]any{}
+			provider["options"] = options
+		}
+		options["apiKey"] = jwt
+		if _, ok := options["baseURL"]; !ok {
+			options["baseURL"] = "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+		}
 	}
 	raw, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {

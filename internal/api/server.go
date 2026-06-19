@@ -27,23 +27,29 @@ import (
 )
 
 type Server struct {
-	cfg      config.Config
-	port     int
-	admin    *state.AdminStore
-	accounts *accounts.Store
-	oauth    *auth.Service
-	quota    *quota.Service
-	pool     *accountpool.Pool
-	loader   *upstream.Loader
-	captcha  *captcha.Bridge
-	browser  *captcha.BrowserManager
-	proxy    *proxy.Service
-	queue    *requestqueue.Queue
-	http     *http.Server
-	logs     *logBuffer
-	reserve  *usageReserve
-	zcode    *zcodeBridge
+	cfg          config.Config
+	port         int
+	admin        *state.AdminStore
+	accounts     *accounts.Store
+	oauth        *auth.Service
+	quota        *quota.Service
+	pool         *accountpool.Pool
+	loader       *upstream.Loader
+	captcha      *captcha.Bridge
+	browser      *captcha.BrowserManager
+	proxy        *proxy.Service
+	queue        *requestqueue.Queue
+	http         *http.Server
+	logs         *logBuffer
+	reserve      *usageReserve
+	zcode        *zcodeBridge
+	zcodeApplyMu sync.Mutex
 }
+
+const (
+	accountListQuotaCacheMaxAge = 30 * time.Second
+	accountListQuotaTimeout     = 8 * time.Second
+)
 
 func New(
 	cfg config.Config,
@@ -519,37 +525,62 @@ func truncateString(value string, limit int) string {
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	activeID, publicAccounts := s.accounts.Public()
+	includeQuota := accountListIncludesQuota(r)
+	if !includeQuota {
+		data := make([]map[string]any, 0, len(publicAccounts))
+		for _, public := range publicAccounts {
+			value := mapFrom(public)
+			value["credentialSource"] = "zcode-oauth-cli"
+			value["quota"] = nil
+			value["quotaError"] = nil
+			value["quotaSkipped"] = true
+			data = append(data, value)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "activeAccountId": activeID, "refreshSupported": false, "loginRequiredOnExpiry": true, "data": data})
+		return
+	}
+
 	type result struct {
 		index int
 		value map[string]any
 	}
-	channel := make(chan result, len(publicAccounts))
-	var wait sync.WaitGroup
-	for index, public := range publicAccounts {
-		wait.Add(1)
-		go func(index int, public accounts.PublicAccount) {
-			defer wait.Done()
-			account := s.accounts.Get(public.ID)
-			value := mapFrom(public)
-			value["credentialSource"] = "zcode-oauth-cli"
-			snapshot, err := s.quota.Snapshot(r.Context(), s.loader.Load(account))
-			if err != nil {
-				value["quota"] = nil
-				value["quotaError"] = map[string]any{"message": err.Error(), "type": "zcode_quota_fetch_failed"}
-			} else {
-				value["quota"] = snapshot
-				value["quotaError"] = nil
-			}
-			channel <- result{index: index, value: value}
-		}(index, public)
-	}
-	wait.Wait()
-	close(channel)
 	data := make([]map[string]any, len(publicAccounts))
-	for item := range channel {
-		data[item.index] = item.value
+	for index, public := range publicAccounts {
+		account := s.accounts.Get(public.ID)
+		value := mapFrom(public)
+		value["credentialSource"] = "zcode-oauth-cli"
+		if account == nil {
+			value["quota"] = nil
+			value["quotaError"] = map[string]any{"message": "account not found", "type": "not_found"}
+			data[index] = value
+			continue
+		}
+		quotaCtx, cancel := context.WithTimeout(r.Context(), accountListQuotaTimeout)
+		snapshot, err := s.quota.BalanceSnapshot(quotaCtx, s.loader.Load(account))
+		cancel()
+		if err != nil {
+			value["quota"] = nil
+			value["quotaError"] = map[string]any{"message": err.Error(), "type": "zcode_quota_fetch_failed"}
+		} else {
+			value["quota"] = snapshot
+			value["quotaError"] = nil
+		}
+		data[index] = value
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "activeAccountId": activeID, "refreshSupported": false, "loginRequiredOnExpiry": true, "data": data})
+}
+
+func accountListIncludesQuota(r *http.Request) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("quota")))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include_quota")))
+	}
+	switch value {
+	case "0", "false", "no", "off", "skip", "none":
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
@@ -571,7 +602,9 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	value := mapFrom(public)
 	value["object"] = "zcode.account"
 	value["credentialSource"] = "zcode-oauth-cli"
-	snapshot, err := s.quota.Snapshot(r.Context(), s.loader.Load(account))
+	quotaCtx, cancel := context.WithTimeout(r.Context(), accountListQuotaTimeout)
+	defer cancel()
+	snapshot, err := s.quota.BalanceSnapshot(quotaCtx, s.loader.Load(account))
 	if err != nil {
 		value["quota"] = nil
 		value["quotaError"] = map[string]any{"message": err.Error(), "type": "zcode_quota_fetch_failed"}
@@ -610,12 +643,15 @@ func (s *Server) authAccounts(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	flow, err := s.oauth.Start(r.Context())
+	elapsed := time.Since(started)
 	if err != nil {
+		s.logs.add("warn", "auth.start_failed", fmt.Sprintf("Login ZCode falhou apos %s ao iniciar o fluxo OAuth: %s", elapsed, err))
 		writeError(w, http.StatusBadGateway, err.Error(), "zcode_auth_flow_failed")
 		return
 	}
-	s.logs.add("info", "auth.started", "Novo login ZCode iniciado")
+	s.logs.add("info", "auth.started", fmt.Sprintf("Novo login ZCode iniciado em %s (flow %s)", elapsed, flow.FlowID))
 	writeJSON(w, http.StatusCreated, flow)
 }
 
@@ -625,13 +661,18 @@ func (s *Server) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "flow_id is required", "invalid_request_error")
 		return
 	}
+	started := time.Now()
 	result, err := s.oauth.Poll(r.Context(), flowID)
+	elapsed := time.Since(started)
 	if err != nil {
+		s.logs.add("warn", "auth.poll_failed", fmt.Sprintf("Poll do flow %s falhou apos %s: %s", flowID, elapsed, err))
 		writeError(w, http.StatusBadGateway, err.Error(), "zcode_auth_flow_failed")
 		return
 	}
 	if result["status"] == "ready" {
-		s.logs.add("info", "auth.completed", "Conta ZCode autenticada e adicionada à fila")
+		s.logs.add("info", "auth.completed", fmt.Sprintf("Conta ZCode autenticada e adicionada à fila (flow %s concluido apos %s)", flowID, elapsed))
+	} else if elapsed > time.Second {
+		s.logs.add("warn", "auth.poll_slow", fmt.Sprintf("Poll do flow %s levou %s para retornar status=%v", flowID, elapsed, result["status"]))
 	}
 	writeJSON(w, http.StatusOK, result)
 }

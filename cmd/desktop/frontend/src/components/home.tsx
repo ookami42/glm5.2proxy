@@ -35,37 +35,60 @@ function zcodeApplyMessage(result: ZCodeApplyResult): string {
       : ''
     return `${result.bridgePatchMessage ?? 'Bridge do ZCode instalado automaticamente.'}${restartText} A conta foi aplicada e o refresh live ficou pronto.`
   }
-  if (result.liveRefreshPossible) return 'Conta aplicada no ZCode e refresh live disponivel.'
+  if (result.bridgeRestartedApp) {
+    return 'Conta gravada no ZCode. O bridge nao confirmou o refresh live, entao o ZCode foi reiniciado para carregar a conta.'
+  }
   if (result.liveRefreshQueued) {
     return 'Conta gravada no ZCode e refresh live enfileirado. Com o bridge v2 instalado, a janela do ZCode recarrega sozinha para mostrar o perfil certo.'
   }
+  if (result.liveRefreshPossible) return 'Conta aplicada no ZCode e refresh live disponivel.'
   const suffix = result.liveRefreshReason ? ` Motivo: ${result.liveRefreshReason}` : ''
   return `Conta gravada no ZCode. A janela aberta pode continuar usando a credencial antiga ate o ZCode recarregar o runtime.${suffix}`
 }
 
+type AccountAction = { id: string; type: 'activate' | 'applyZCode' }
+
 export function Home() {
-  const { data: accountsData, loading, error: accountsError, refresh, reorder } = useAccounts()
+  const { data: accountsData, loading, error: accountsError, refresh, reorder, quotaRefreshing } = useAccounts()
   const settingsState = useSettings()
   const [accounts, setAccounts] = useState<Account[]>([])
+  const [optimisticActiveAccountId, setOptimisticActiveAccountId] = useState<string | null>(null)
   const [loginOpen, setLoginOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
   const [apiSettingsOpen, setAPISettingsOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [accountAction, setAccountActionState] = useState<AccountAction | null>(null)
   const [switchEvent, setSwitchEvent] = useState<{ fromId: string | null; toId: string; timestamp: number } | null>(null)
   const [zcodeSync, setZCodeSync] = useState<Record<string, { status: 'idle' | 'syncing' | 'synced' | 'skipped' | 'error'; message: string | null }>>({})
   const [now, setNow] = useState(() => Date.now())
   const dragOrderRef = useRef<Account[]>([])
   const previousActiveIdRef = useRef<string | null>(null)
+  const accountActionRef = useRef<AccountAction | null>(null)
+
+  const setAccountAction = (action: AccountAction | null) => {
+    accountActionRef.current = action
+    setAccountActionState(action)
+  }
+
+  const clearAccountAction = (id: string, type: AccountAction['type']) => {
+    const current: AccountAction | null = accountActionRef.current
+    if (current?.id === id && current.type === type) {
+      setAccountAction(null)
+    }
+  }
 
   useEffect(() => {
     if (accountsData) {
       setAccounts(accountsData.data)
       dragOrderRef.current = accountsData.data
+      if (optimisticActiveAccountId && accountsData.activeAccountId === optimisticActiveAccountId) {
+        setOptimisticActiveAccountId(null)
+      }
     }
-  }, [accountsData])
+  }, [accountsData, optimisticActiveAccountId])
 
-  const activeAccountId = accountsData?.activeAccountId ?? null
+  const activeAccountId = optimisticActiveAccountId ?? accountsData?.activeAccountId ?? null
   const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? null
   const settings = settingsState.settings
   const apiStatusText = settings?.apiEnabled
@@ -108,16 +131,19 @@ export function Home() {
     dragOrderRef.current = ordered
     try {
       await reorder(ordered)
-      await refresh()
+      await refresh({ cancelInFlight: true })
     } catch {
-      await refresh()
+      await refresh({ cancelInFlight: true })
     }
   }
 
   const activate = async (id: string) => {
+    if (accountActionRef.current) return
+    setAccountAction({ id, type: 'activate' })
     setZCodeSync((current) => ({ ...current, [id]: { status: 'syncing', message: 'Aplicando esta conta no ambiente interno do ZCode...' } }))
     try {
       const result = await api.post<AccountActivateResponse>(`/api/admin/accounts/${id}/activate`)
+      setOptimisticActiveAccountId(result.activeAccount.id || id)
       const zcode = result.zcode
       setZCodeSync((current) => ({
         ...current,
@@ -127,14 +153,17 @@ export function Home() {
             ? { status: 'error', message: `Proxy ativado, mas ZCode falhou: ${zcode.error}` }
             : { status: 'skipped', message: 'Proxy ativado. Ambiente interno do ZCode nao foi detectado, sincronizacao ignorada.' },
       }))
-      await refresh()
+      await refresh({ cancelInFlight: true })
     } catch (err) {
       setZCodeSync((current) => ({ ...current, [id]: { status: 'error', message: err instanceof Error ? err.message : 'Falha ao ativar conta' } }))
-      throw err
+    } finally {
+      clearAccountAction(id, 'activate')
     }
   }
 
   const applyAccountInZCode = async (id: string) => {
+    if (accountActionRef.current) return
+    setAccountAction({ id, type: 'applyZCode' })
     setZCodeSync((current) => ({ ...current, [id]: { status: 'syncing', message: 'Aplicando manualmente no ZCode...' } }))
     try {
       const response = await api.post<{ data: ZCodeApplyResult }>(`/api/admin/zcode/accounts/${id}/activate`)
@@ -142,13 +171,15 @@ export function Home() {
     } catch (err) {
       setZCodeSync((current) => ({ ...current, [id]: { status: 'error', message: err instanceof Error ? err.message : 'Falha ao aplicar no ZCode' } }))
       throw err
+    } finally {
+      clearAccountAction(id, 'applyZCode')
     }
   }
 
   const refreshAccounts = async () => {
     setRefreshing(true)
     try {
-      await refresh()
+      await refresh({ cancelInFlight: true, includeQuota: true })
     } finally {
       setRefreshing(false)
     }
@@ -279,8 +310,8 @@ export function Home() {
                 </p>
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={refreshAccounts} disabled={refreshing}>
-                  <RefreshCw className={refreshing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+                <Button variant="outline" size="sm" onClick={refreshAccounts} disabled={refreshing || quotaRefreshing}>
+                  <RefreshCw className={refreshing || quotaRefreshing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
                   Atualizar cotas
                 </Button>
                 <Button size="sm" onClick={() => setLoginOpen(true)}>
@@ -317,7 +348,10 @@ export function Home() {
                     isSwitching={account.id === switchEvent?.toId}
                     isFirst={index === 0}
                     isLast={index === accounts.length - 1}
-                    refreshing={refreshing}
+                    refreshing={refreshing || quotaRefreshing}
+                    activatePending={accountAction?.id === account.id && accountAction.type === 'activate'}
+                    zcodePending={accountAction?.id === account.id && accountAction.type === 'applyZCode'}
+                    actionsDisabled={accountAction !== null}
                     globalThinking={settings?.globalThinking ?? null}
                     accountThinking={settings?.accountThinking?.[account.id] ?? null}
                     onActivate={() => activate(account.id)}
@@ -338,7 +372,7 @@ export function Home() {
         </div>
       </main>
 
-      <LoginDialog open={loginOpen} onOpenChange={setLoginOpen} onSuccess={refreshAccounts} />
+      <LoginDialog open={loginOpen} onOpenChange={setLoginOpen} onSuccess={() => { void refresh({ cancelInFlight: true }) }} />
       <LogsDialog open={logsOpen} onOpenChange={setLogsOpen} />
       {settings && (
         <SettingsDialog

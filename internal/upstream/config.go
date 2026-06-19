@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"glm5.2proxy/internal/accounts"
 	"glm5.2proxy/internal/config"
@@ -24,8 +26,12 @@ type Config struct {
 }
 
 type Loader struct {
-	cfg      config.Config
-	accounts *accounts.Store
+	cfg          config.Config
+	accounts     *accounts.Store
+	mu           sync.Mutex
+	cachedRecord map[string]any
+	cachedSource string
+	cachedUntil  time.Time
 }
 
 func NewLoader(cfg config.Config, store *accounts.Store) *Loader {
@@ -33,7 +39,7 @@ func NewLoader(cfg config.Config, store *accounts.Store) *Loader {
 }
 
 func (l *Loader) Load(account *accounts.Account) Config {
-	record, source := latestModelIO(l.cfg.ModelIODir)
+	record, source := l.cachedModelIO()
 	headers := map[string]string{}
 	template := nativeBodyTemplate()
 	endpoint := l.cfg.UpstreamURL
@@ -103,6 +109,19 @@ func (l *Loader) Load(account *accounts.Account) Config {
 		accountID = account.ID
 	}
 	return Config{Endpoint: endpoint, BaseHeaders: baseHeaders, BodyTemplate: template, Source: activeSource, AccountID: accountID, ActiveAccount: public, HasAuthorization: authorization != "", HasCaptcha: captcha != ""}
+}
+
+func (l *Loader) cachedModelIO() (map[string]any, string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if time.Now().Before(l.cachedUntil) {
+		return l.cachedRecord, l.cachedSource
+	}
+	record, source := latestModelIO(l.cfg.ModelIODir)
+	l.cachedRecord = record
+	l.cachedSource = source
+	l.cachedUntil = time.Now().Add(10 * time.Second)
+	return record, source
 }
 
 func nativeBodyTemplate() map[string]any {
