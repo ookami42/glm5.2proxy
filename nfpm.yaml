@@ -1,0 +1,12 @@
+name: glm5.2proxy
+arch: amd64
+version: "0.2.0"
+description: "GLM 5.2 Proxy - Desktop application"
+maintainer: "maicon2"
+homepage: "https://github.com/maicon2/glm5.2proxy"
+license: "MIT"
+depends:
+  - libgtk-3-0
+  - libwebkit2gtk-4.1-0
+  - libappindicator3-1
+  - librsvg2-2
