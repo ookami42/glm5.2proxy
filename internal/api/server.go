@@ -110,6 +110,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /zcode/auth/accounts", s.authAccounts)
 	mux.HandleFunc("POST /zcode/auth/login/start", s.loginStart)
 	mux.HandleFunc("GET /zcode/auth/login/poll", s.loginPoll)
+	mux.HandleFunc("POST /zcode/auth/login/callback", s.loginCallback)
 	mux.HandleFunc("POST /zcode/auth/accounts/activate", s.activateAccount)
 	mux.HandleFunc("DELETE /zcode/auth/accounts", s.deleteAccount)
 	mux.HandleFunc("GET /zcode/captcha/poll", s.captcha.Poll)
@@ -142,6 +143,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/accounts/{id}", s.deleteAccountByPath)
 	mux.HandleFunc("POST /api/admin/auth/login/start", s.loginStart)
 	mux.HandleFunc("GET /api/admin/auth/login/poll", s.loginPoll)
+	mux.HandleFunc("POST /api/admin/auth/login/callback", s.loginCallback)
 	mux.HandleFunc("GET /api/admin/logs", s.systemLogs)
 	mux.HandleFunc("GET /api/admin/queue", s.queueSnapshot)
 	return s.cors(mux)
@@ -634,6 +636,28 @@ func (s *Server) loginPoll(w http.ResponseWriter, r *http.Request) {
 		s.logs.add("info", "auth.completed", "Conta ZCode autenticada e adicionada à fila")
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) loginCallback(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		FlowID string `json:"flowId"`
+		Code   string `json:"code"`
+	}
+	if decodeJSON(w, r, &body) != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON", "invalid_request_error")
+		return
+	}
+	if body.FlowID == "" || body.Code == "" {
+		writeError(w, http.StatusBadRequest, "flowId and code are required", "invalid_request_error")
+		return
+	}
+	account, err := s.oauth.ExchangeCode(r.Context(), body.FlowID, body.Code)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "zcode_auth_flow_failed")
+		return
+	}
+	s.logs.add("info", "auth.completed", "Conta ZCode autenticada via callback")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "account": account})
 }
 
 func (s *Server) activateAccount(w http.ResponseWriter, r *http.Request) {

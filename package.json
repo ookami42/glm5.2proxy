@@ -14,5 +14,9 @@
     "test": "go test ./...",
     "test:race": "go test -race ./...",
     "vet": "go vet ./..."
+  },
+  "devDependencies": {
+    "@playwright/mcp": "^0.0.76",
+    "playwright": "^1.61.0"
   }
 }

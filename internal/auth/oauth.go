@@ -114,6 +114,31 @@ func (s *Service) Poll(ctx context.Context, flowID string) (map[string]any, erro
 	return result, nil
 }
 
+func (s *Service) ExchangeCode(ctx context.Context, flowID, code string) (accounts.PublicAccount, error) {
+	s.mu.RLock()
+	flow := s.flows[flowID]
+	s.mu.RUnlock()
+	if flow == nil {
+		return accounts.PublicAccount{}, errors.New("unknown OAuth flow; start login again")
+	}
+	var payload struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := s.request(ctx, http.MethodPost, "/oauth/cli/token", flow.pollToken, map[string]any{"flow_id": flowID, "code": code}, &payload); err != nil {
+		return accounts.PublicAccount{}, fmt.Errorf("token exchange failed: %w", err)
+	}
+	result, err := s.Poll(ctx, flowID)
+	if err != nil {
+		return accounts.PublicAccount{}, fmt.Errorf("poll after exchange failed: %w", err)
+	}
+	account, ok := result["account"].(accounts.PublicAccount)
+	if !ok {
+		return accounts.PublicAccount{}, errors.New("account not found in poll result")
+	}
+	return account, nil
+}
+
 func (s *Service) Status() []Flow {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
