@@ -7,6 +7,8 @@ on:
 jobs:
   build-deb:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +34,7 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
       - name: Build Wails app
-        run: wails build
+        run: wails build -tags webkit2_41
 
       - name: Package .deb
         run: |
@@ -63,3 +65,8 @@ jobs:
         with:
           name: glm5.2proxy-deb
           path: ./*.deb
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./*.deb
