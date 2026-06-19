@@ -207,24 +207,25 @@ disso, as proximas trocas podem acontecer pelo fluxo live.
 
 ### Transparencia e seguranca
 
-Esse comportamento altera arquivos locais do ZCode instalado na maquina. Por
-isso, seja claro ao distribuir o projeto:
+Esse comportamento altera arquivos locais do ZCode instalado na maquina. Esse
+funcionamento faz parte do projeto e e documentado de forma explicita:
 
 - o patch e local, nao remoto;
-- um backup do `app.asar` e criado automaticamente;
-- o app nao recomenda desativar antivirus;
-- se houver falso positivo, o correto e adicionar excecao apenas para a pasta
-  ou executavel confiavel do projeto.
+- um backup do `app.asar` e criado automaticamente antes de qualquer alteracao;
+- o projeto nao recomenda desativar antivirus;
+- se houver falso positivo, a recomendacao e adicionar excecao apenas para a
+  pasta ou executavel confiavel do projeto.
 
 Alguns antivirus podem estranhar esse comportamento porque ele modifica o
-ambiente local de outro app Electron. Isso nao e motivo para orientar o usuario
-a desligar a protecao do sistema.
+ambiente local de outro aplicativo Electron. A orientacao do projeto nao e
+desligar a protecao do sistema, e sim tratar eventuais falsos positivos de
+forma pontual e consciente.
 
 ## Por que aparece tanto PowerShell
 
 No Windows, parte importante da integracao com o ZCode depende de automacao do
 sistema local. O projeto usa PowerShell porque ele e o jeito mais direto e
-confiavel de fazer isso na maquina Windows do usuario.
+confiavel de fazer isso no Windows.
 
 O PowerShell entra principalmente para:
 
@@ -235,9 +236,9 @@ O PowerShell entra principalmente para:
 - reiniciar o ZCode quando necessario;
 - interagir com arquivos de configuracao locais.
 
-Entao, ver PowerShell nesse projeto nao significa gambiarra isolada. Significa
-que a aplicacao desktop esta fazendo trabalho real de integracao com um app
-Electron externo instalado localmente.
+Entao, ver PowerShell nesse projeto nao significa improviso. Significa que a
+aplicacao desktop esta fazendo integracao real com um app Electron externo
+instalado localmente.
 
 Ainda assim, essa parte pode e deve ser refinada. Ha espaco para:
 
@@ -390,7 +391,7 @@ chmod +x ./glm5.2proxy-server-linux-amd64
 ### Linux desktop Wails
 
 O app desktop Linux **nao deve ser buildado no Windows puro**. O caminho
-correto e buildar em:
+recomendado e buildar em:
 
 - Linux nativo; ou
 - WSL2/Ubuntu; ou
@@ -412,9 +413,9 @@ Saida esperada do desktop Linux:
 build/bin/glm5.2proxy
 ```
 
-Se o usuario Linux baixou este repositorio do GitHub, ele ja estara com o
-codigo mais recente; o que ele precisa fazer por conta propria e apenas o build
-do binario Linux, caso nao exista release pronta para o sistema dele.
+Quem baixar este repositorio no Linux ja tera o codigo mais recente. Se ainda
+nao houver release pronta para o sistema desejado, basta compilar o binario
+Linux localmente.
 
 ## Release Local
 
