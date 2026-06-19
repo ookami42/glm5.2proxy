@@ -31,11 +31,35 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-      - name: Build & package .deb
-        run: wails build -package
+      - name: Build Wails app
+        run: wails build
+
+      - name: Package .deb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG="glm5.2proxy_${VERSION}_amd64"
+          mkdir -p "${PKG}/DEBIAN"
+          mkdir -p "${PKG}/usr/local/bin"
+          mkdir -p "${PKG}/usr/share/applications"
+          mkdir -p "${PKG}/usr/share/icons/hicolor/256x256/apps"
+
+          cat > "${PKG}/DEBIAN/control" <<EOF
+Package: glm5.2proxy
+Version: ${VERSION}
+Architecture: amd64
+Maintainer: maicon2
+Description: GLM 5.2 Proxy - Desktop application
+Depends: libgtk-3-0, libwebkit2gtk-4.1-0, libappindicator3-1, librsvg2-2
+EOF
+
+          cp build/bin/glm5.2proxy "${PKG}/usr/local/bin/"
+          cp build/glm5.2proxy.desktop "${PKG}/usr/share/applications/"
+          cp build/appicon.png "${PKG}/usr/share/icons/hicolor/256x256/apps/glm5.2proxy.png"
+
+          dpkg-deb --build "${PKG}"
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: glm5.2proxy-deb
-          path: build/bin/*.deb
+          path: ./*.deb
