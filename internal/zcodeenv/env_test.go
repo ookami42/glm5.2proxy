@@ -105,11 +105,27 @@ func TestDetectBridgeProxyBaseURL(t *testing.T) {
 func TestUpdateConfigWritesBothZCodeCodingProviders(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{
+  "provider": {
+    "builtin:zai-start-plan": {
+      "enabled": false,
+      "systemDisabledReason": "coding_plan_not_entitled",
+      "options": {
+        "baseURL": "https://wrong.example.test/anthropic",
+        "other": "legacy-preserved"
+      }
+    },
+    "builtin:zai-coding-plan": {
+      "enabled": false,
+      "systemDisabledReason": "coding_plan_not_entitled",
+      "options": {
+        "baseURL": "https://api.z.ai/api/anthropic"
+      }
+    }
+  },
   "modelProviders": {
     "builtin:zai-start-plan": {
       "enabled": false,
       "options": {
-        "baseURL": "https://custom.example.test/anthropic",
         "other": "preserved"
       }
     }
@@ -117,8 +133,12 @@ func TestUpdateConfigWritesBothZCodeCodingProviders(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := updateConfig(path, "jwt-token"); err != nil {
+	changed, err := updateConfig(path, "jwt-token")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected first config repair to change the file")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -130,6 +150,7 @@ func TestUpdateConfigWritesBothZCodeCodingProviders(t *testing.T) {
 	}
 	providers := saved["modelProviders"].(map[string]any)
 	for _, providerID := range codingPlanProviderIDs {
+		providerConfig := codingPlanProviderConfigByID[providerID]
 		provider := providers[providerID].(map[string]any)
 		if provider["enabled"] != true {
 			t.Fatalf("%s was not enabled", providerID)
@@ -138,15 +159,212 @@ func TestUpdateConfigWritesBothZCodeCodingProviders(t *testing.T) {
 		if options["apiKey"] != "jwt-token" {
 			t.Fatalf("%s apiKey was not updated", providerID)
 		}
-		if options["baseURL"] == "" {
-			t.Fatalf("%s baseURL was not set", providerID)
+		if options["baseURL"] != providerConfig.ModelBaseURL {
+			t.Fatalf("%s baseURL mismatch: %#v", providerID, options["baseURL"])
 		}
 	}
 	startOptions := providers["builtin:zai-start-plan"].(map[string]any)["options"].(map[string]any)
 	if startOptions["other"] != "preserved" {
 		t.Fatal("existing provider options were not preserved")
 	}
-	if startOptions["baseURL"] != "https://custom.example.test/anthropic" {
-		t.Fatal("existing provider baseURL was overwritten")
+
+	legacyProviders := saved["provider"].(map[string]any)
+	for _, providerID := range codingPlanProviderIDs {
+		providerConfig := codingPlanProviderConfigByID[providerID]
+		provider := legacyProviders[providerID].(map[string]any)
+		if provider["enabled"] != true {
+			t.Fatalf("legacy %s was not enabled", providerID)
+		}
+		if _, ok := provider["systemDisabledReason"]; ok {
+			t.Fatalf("legacy %s still has systemDisabledReason", providerID)
+		}
+		if _, ok := provider["apiKeyRequired"]; ok {
+			t.Fatalf("legacy %s still has apiKeyRequired at the top level", providerID)
+		}
+		options := provider["options"].(map[string]any)
+		if options["apiKey"] != "jwt-token" {
+			t.Fatalf("legacy %s apiKey was not updated", providerID)
+		}
+		if options["apiKeyRequired"] != true {
+			t.Fatalf("legacy %s options.apiKeyRequired was not enabled", providerID)
+		}
+		if options["baseURL"] != providerConfig.LegacyBaseURL {
+			t.Fatalf("legacy %s baseURL mismatch: %#v", providerID, options["baseURL"])
+		}
+	}
+	legacyStartOptions := legacyProviders["builtin:zai-start-plan"].(map[string]any)["options"].(map[string]any)
+	if legacyStartOptions["other"] != "legacy-preserved" {
+		t.Fatal("legacy provider options were not preserved")
+	}
+	changed, err = updateConfig(path, "jwt-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("expected second config repair to be a no-op")
+	}
+}
+
+func TestClearCodingPlanCacheRemovesStaleEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coding-plan-cache.json")
+	if err := os.WriteFile(path, []byte(`{
+  "version": 1,
+  "entryStatus": {
+    "updatedAt": 123,
+    "items": {
+      "builtin:zai-start-plan": {
+        "status": "unavailable",
+        "reason": "coding_plan_not_entitled"
+      },
+      "builtin:zai-coding-plan": {
+        "status": "unavailable",
+        "reason": "coding_plan_not_entitled"
+      },
+      "builtin:bigmodel-start-plan": {
+        "status": "unavailable",
+        "reason": "coding_plan_not_authenticated"
+      }
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := clearCodingPlanCache(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected coding plan cache to change")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	entryStatus := saved["entryStatus"].(map[string]any)
+	items := entryStatus["items"].(map[string]any)
+	for _, providerID := range codingPlanProviderIDs {
+		if _, ok := items[providerID]; ok {
+			t.Fatalf("%s entry was not cleared", providerID)
+		}
+	}
+	if _, ok := items["builtin:bigmodel-start-plan"]; !ok {
+		t.Fatal("unrelated coding plan cache entry should have been preserved")
+	}
+	if entryStatus["updatedAt"].(float64) <= 123 {
+		t.Fatal("updatedAt was not refreshed")
+	}
+}
+
+func TestEnforceCodingPlanStateInEnvironmentRepairsFiles(t *testing.T) {
+	dir := t.TempDir()
+	env := Environment{
+		HomeDir:        dir,
+		DataDir:        dir,
+		ConfigPath:     filepath.Join(dir, "config.json"),
+		CodingPlanPath: filepath.Join(dir, "coding-plan-cache.json"),
+	}
+	account := accounts.Account{
+		User:          accounts.User{UserID: "u1", Email: "u1@example.com", Name: "User 1"},
+		ZCodeJWTToken: "jwt-token",
+	}
+	if err := os.WriteFile(env.ConfigPath, []byte(`{
+  "provider": {
+    "builtin:zai-start-plan": {
+      "enabled": false,
+      "systemDisabledReason": "coding_plan_not_entitled",
+      "options": {}
+    }
+  },
+  "modelProviders": {
+    "builtin:zai-start-plan": {
+      "enabled": false,
+      "options": {}
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.CodingPlanPath, []byte(`{
+  "version": 1,
+  "entryStatus": {
+    "updatedAt": 1,
+    "items": {
+      "builtin:zai-start-plan": {
+        "status": "unavailable",
+        "reason": "coding_plan_not_entitled"
+      }
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := EnforceCodingPlanStateInEnvironment(env, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected enforce to repair zcode state")
+	}
+	raw, err := os.ReadFile(env.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	providers := saved["modelProviders"].(map[string]any)
+	legacyProviders := saved["provider"].(map[string]any)
+	for _, providerID := range codingPlanProviderIDs {
+		providerConfig := codingPlanProviderConfigByID[providerID]
+		provider := providers[providerID].(map[string]any)
+		if provider["enabled"] != true {
+			t.Fatalf("repaired %s was not enabled", providerID)
+		}
+		providerOptions := provider["options"].(map[string]any)
+		if providerOptions["apiKey"] != "jwt-token" {
+			t.Fatalf("repaired %s apiKey mismatch", providerID)
+		}
+		if providerOptions["baseURL"] != providerConfig.ModelBaseURL {
+			t.Fatalf("repaired %s modelProviders baseURL mismatch: %#v", providerID, providerOptions["baseURL"])
+		}
+		legacyProvider := legacyProviders[providerID].(map[string]any)
+		if legacyProvider["enabled"] != true {
+			t.Fatalf("repaired legacy %s was not enabled", providerID)
+		}
+		if _, ok := legacyProvider["systemDisabledReason"]; ok {
+			t.Fatalf("repaired legacy %s still has systemDisabledReason", providerID)
+		}
+		if _, ok := legacyProvider["apiKeyRequired"]; ok {
+			t.Fatalf("repaired legacy %s still has apiKeyRequired at the top level", providerID)
+		}
+		legacyOptions := legacyProvider["options"].(map[string]any)
+		if legacyOptions["apiKey"] != "jwt-token" {
+			t.Fatalf("repaired legacy %s apiKey mismatch", providerID)
+		}
+		if legacyOptions["apiKeyRequired"] != true {
+			t.Fatalf("repaired legacy %s options.apiKeyRequired mismatch", providerID)
+		}
+		if legacyOptions["baseURL"] != providerConfig.LegacyBaseURL {
+			t.Fatalf("repaired legacy %s baseURL mismatch: %#v", providerID, legacyOptions["baseURL"])
+		}
+	}
+	raw, err = os.ReadFile(env.CodingPlanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cache map[string]any
+	if err := json.Unmarshal(raw, &cache); err != nil {
+		t.Fatal(err)
+	}
+	items := cache["entryStatus"].(map[string]any)["items"].(map[string]any)
+	for _, providerID := range codingPlanProviderIDs {
+		if _, ok := items[providerID]; ok {
+			t.Fatalf("repaired cache still contains %s", providerID)
+		}
 	}
 }

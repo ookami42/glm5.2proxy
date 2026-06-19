@@ -127,6 +127,12 @@ func (b *zcodeBridge) Pending(commandID string) bool {
 	return b.pending != nil && b.pending.CommandID == commandID
 }
 
+func (b *zcodeBridge) HasPending() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pending != nil
+}
+
 func (b *zcodeBridge) Status() zcodeBridgeStatus {
 	b.mu.Lock()
 	defer b.mu.Unlock()

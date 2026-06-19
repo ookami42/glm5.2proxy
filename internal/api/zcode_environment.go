@@ -56,6 +56,8 @@ func (s *Server) applyAccountInZCode(accountID string) (*zcodeenv.ApplyResult, e
 func (s *Server) applyAccountToZCode(account accounts.Account, requireEnvironment bool) (*zcodeenv.ApplyResult, string, error) {
 	s.zcodeApplyMu.Lock()
 	defer s.zcodeApplyMu.Unlock()
+	s.zcodeApplySeq++
+	applySeq := s.zcodeApplySeq
 
 	env := zcodeenv.Detect()
 	if requireEnvironment && !zcodeenv.Available(env) {
@@ -67,6 +69,7 @@ func (s *Server) applyAccountToZCode(account accounts.Account, requireEnvironmen
 		return nil, "", err
 	}
 	commandID := s.queueZCodeRefresh(&result)
+	s.scheduleZCodeStateReconcile(account.ID, applySeq)
 	return &result, commandID, nil
 }
 
@@ -77,14 +80,75 @@ func (s *Server) queueZCodeRefresh(result *zcodeenv.ApplyResult) string {
 		}
 		return ""
 	}
-	command := s.zcode.QueueRefresh(result.Account.ID, result.Account.Label)
-	result.LiveRefreshQueued = true
-	s.scheduleZCodeRefreshFallback(command.CommandID)
-	return command.CommandID
+	commandID := s.queueZCodeRefreshForAccount(result.Account.ID, result.Account.Label, result.LiveRefreshPossible)
+	result.LiveRefreshQueued = commandID != ""
+	return commandID
 }
 
 func (s *Server) scheduleZCodeRefreshFallback(commandID string) {
 	go s.finishPendingZCodeRefresh(commandID)
+}
+
+func (s *Server) queueZCodeRefreshForAccount(accountID, accountLabel string, liveRefreshPossible bool) string {
+	if !liveRefreshPossible {
+		return ""
+	}
+	command := s.zcode.QueueRefresh(accountID, accountLabel)
+	s.scheduleZCodeRefreshFallback(command.CommandID)
+	return command.CommandID
+}
+
+func (s *Server) scheduleZCodeStateReconcile(accountID string, applySeq int64) {
+	go s.reconcileZCodeState(accountID, applySeq)
+}
+
+func (s *Server) reconcileZCodeState(accountID string, applySeq int64) {
+	needsLiveRefresh := false
+	for _, delay := range []time.Duration{
+		2 * time.Second,
+		4 * time.Second,
+		4 * time.Second,
+		4 * time.Second,
+		4 * time.Second,
+		4 * time.Second,
+		4 * time.Second,
+		4 * time.Second,
+	} {
+		time.Sleep(delay)
+		s.zcodeApplyMu.Lock()
+		if s.zcodeApplySeq != applySeq {
+			s.zcodeApplyMu.Unlock()
+			return
+		}
+		account := s.accounts.Get(accountID)
+		if account == nil {
+			s.zcodeApplyMu.Unlock()
+			return
+		}
+		env := zcodeenv.Detect()
+		changed, err := zcodeenv.EnforceCodingPlanStateInEnvironment(env, *account)
+		if changed {
+			needsLiveRefresh = true
+		}
+		queuedRefresh := false
+		if needsLiveRefresh && env.LiveRefreshPossible && !s.zcode.HasPending() {
+			queuedRefresh = s.queueZCodeRefreshForAccount(account.ID, accounts.Sanitize(*account).Label, true) != ""
+			if queuedRefresh {
+				needsLiveRefresh = false
+			}
+		}
+		s.zcodeApplyMu.Unlock()
+		if err != nil {
+			s.logs.add("warn", "zcode.coding_plan_reconcile_failed", "Falha ao reconciliar estado do Coding Plan no ZCode: "+err.Error())
+			continue
+		}
+		if changed {
+			s.logs.add("info", "zcode.coding_plan_reconciled", "Estado local do Coding Plan no ZCode foi reaplicado apos a inicializacao para impedir retorno de not_entitled.")
+		}
+		if queuedRefresh {
+			s.logs.add("info", "zcode.coding_plan_reconcile_refresh_queued", "Refresh live reenfileirado apos o reparo local do Coding Plan para atualizar o estado em memoria do ZCode.")
+		}
+	}
 }
 
 func (s *Server) finishPendingZCodeRefresh(commandID string) {

@@ -30,6 +30,47 @@ Isso resolve o problema de manter dois pools separados:
 Agora o proxy pode ser a origem de verdade das contas, e o ZCode pode seguir o
 que foi ativado nele.
 
+## Situacao atual e recomendacao pratica
+
+Hoje o projeto tem dois caminhos de operacao:
+
+- usar a API OpenAI-compatible local;
+- usar o app para trocar a conta diretamente no ZCode.
+
+Os dois funcionam, mas o estado atual do projeto nao e o mesmo para os dois.
+
+### O que hoje esta mais estavel
+
+O caminho mais estavel, no momento, e:
+
+- adicionar as contas no `glm5.2proxy`;
+- escolher a conta no painel;
+- aplicar/trocar essa conta no proprio ZCode;
+- usar o ZCode com a conta ja sincronizada.
+
+### O que hoje esta mais instavel
+
+O modo OpenAI-compatible ainda pode oscilar mais porque ele depende de mais
+camadas:
+
+- traducao OpenAI -> formato aceito pelo upstream;
+- streaming SSE;
+- fila por conta/modelo;
+- consultas de cota;
+- rotacao automatica quando uma conta perde viabilidade;
+- comportamento do proprio upstream da Z.ai/ZCode.
+
+Por isso, a recomendacao operacional atual do projeto e:
+
+- para uso direto no editor/app ZCode, prefira trocar a conta no ZCode pelo
+  `glm5.2proxy`;
+- use a API OpenAI-compatible quando voce realmente precisar integrar clientes
+  externos como Roo Code, Kilo Code, Open WebUI e scripts.
+
+Esse caminho OpenAI-compatible vai continuar recebendo otimizacoes. Ainda ha
+trabalho para reduzir latencia, diminuir estados intermediarios confusos e
+deixar o fluxo mais previsivel. Mesmo assim, o sistema ja esta operacional.
+
 ## Dois modos de uso
 
 ### 1. Usar o proxy como API OpenAI-compatible
@@ -63,6 +104,62 @@ Quando voce usa `Aplicar no ZCode` ou ativa uma conta pelo fluxo integrado:
 - o ZCode recarrega a janela e atualiza o perfil visual e o runtime da conta.
 
 Em outras palavras: o proxy pode comandar qual conta o ZCode vai usar.
+
+## Diferenca entre os botoes do app
+
+O painel agora deixa isso claro tambem por hover/tooltip nos botoes.
+
+### `Usar agora`
+
+Esse botao:
+
+- troca a conta ativa do proxy;
+- atualiza a conta que o modo OpenAI-compatible vai usar como base;
+- tenta sincronizar essa mesma conta no ZCode tambem.
+
+Esse e o botao certo quando voce quer mudar o estado geral do app.
+
+### `Aplicar no ZCode`
+
+Esse botao:
+
+- grava a conta diretamente no ambiente interno do ZCode;
+- nao muda a conta ativa do proxy;
+- serve para forcar a conta desejada no cliente ZCode sem alterar o pool
+  principal do proxy.
+
+Esse e o botao certo quando voce quer comandar so o ZCode.
+
+## Manual de uso
+
+### Fluxo recomendado para uso no proprio ZCode
+
+1. Abra o `glm5.2proxy.exe`.
+2. Adicione uma ou mais contas no painel.
+3. Organize a fila na ordem desejada.
+4. Passe o mouse nos botoes para ver a explicacao de cada um.
+5. Se quiser trocar tudo de uma vez, use `Usar agora`.
+6. Se quiser sincronizar so o app ZCode, use `Aplicar no ZCode`.
+7. Aguarde o refresh live ou o pequeno reload do ZCode.
+8. Confirme no ZCode se o perfil/modelo esperado apareceu.
+
+### Fluxo recomendado para rotacao manual
+
+1. Mantenha varias contas salvas no painel.
+2. Quando uma conta ficar ruim, limitada ou sem plano util no ZCode, selecione
+   outra.
+3. Use `Aplicar no ZCode` para empurrar essa conta para dentro do ZCode.
+4. Continue trabalhando no ZCode com a conta nova.
+
+### Fluxo para clientes OpenAI-compatible
+
+1. Inicie o app.
+2. Adicione pelo menos uma conta.
+3. Gere uma API key local no painel.
+4. Configure o cliente externo para usar `http://127.0.0.1:3005/v1`.
+5. Use `glm-5.2` ou `glm-5-turbo`.
+6. Se notar instabilidade, volte para a estrategia recomendada: trocar a conta
+   no ZCode e operar por la.
 
 ## Como funciona o bridge do ZCode
 
@@ -122,6 +219,53 @@ isso, seja claro ao distribuir o projeto:
 Alguns antivirus podem estranhar esse comportamento porque ele modifica o
 ambiente local de outro app Electron. Isso nao e motivo para orientar o usuario
 a desligar a protecao do sistema.
+
+## Por que aparece tanto PowerShell
+
+No Windows, parte importante da integracao com o ZCode depende de automacao do
+sistema local. O projeto usa PowerShell porque ele e o jeito mais direto e
+confiavel de fazer isso na maquina Windows do usuario.
+
+O PowerShell entra principalmente para:
+
+- localizar a instalacao do ZCode;
+- inspecionar processos em execucao;
+- aplicar ou restaurar o patch do `app.asar`;
+- copiar backups;
+- reiniciar o ZCode quando necessario;
+- interagir com arquivos de configuracao locais.
+
+Entao, ver PowerShell nesse projeto nao significa gambiarra isolada. Significa
+que a aplicacao desktop esta fazendo trabalho real de integracao com um app
+Electron externo instalado localmente.
+
+Ainda assim, essa parte pode e deve ser refinada. Ha espaco para:
+
+- menos passos externos;
+- mensagens de estado mais claras;
+- menos dependencia de reinicio;
+- mais resiliencia em cenarios de corrida e refresh.
+
+Mas para colocar a funcao em operacao agora, esse desenho ja entrega valor.
+
+## Processo interno resumido
+
+Quando voce manda trocar a conta no ZCode pelo `glm5.2proxy`, o fluxo interno,
+em alto nivel, e este:
+
+1. o painel React envia o comando para o backend Go;
+2. o backend localiza a conta salva;
+3. o backend escreve credenciais e configuracao no ambiente do ZCode;
+4. ele valida/repara o estado de `coding plan` local;
+5. se o bridge estiver disponivel, enfileira um refresh live;
+6. o renderer do ZCode busca esse comando;
+7. o ZCode atualiza o provider/model provider em memoria;
+8. a janela recarrega para refletir o estado novo;
+9. o app volta a mostrar a conta/modelo corretos.
+
+Se o bridge ainda nao estiver presente, o projeto tenta instalar o patch local
+e, se preciso, reinicia o ZCode uma vez para entrar no modo live nas proximas
+trocas.
 
 ## Funcionalidades
 

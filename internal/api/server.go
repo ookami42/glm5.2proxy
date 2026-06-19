@@ -27,23 +27,24 @@ import (
 )
 
 type Server struct {
-	cfg          config.Config
-	port         int
-	admin        *state.AdminStore
-	accounts     *accounts.Store
-	oauth        *auth.Service
-	quota        *quota.Service
-	pool         *accountpool.Pool
-	loader       *upstream.Loader
-	captcha      *captcha.Bridge
-	browser      *captcha.BrowserManager
-	proxy        *proxy.Service
-	queue        *requestqueue.Queue
-	http         *http.Server
-	logs         *logBuffer
-	reserve      *usageReserve
-	zcode        *zcodeBridge
-	zcodeApplyMu sync.Mutex
+	cfg           config.Config
+	port          int
+	admin         *state.AdminStore
+	accounts      *accounts.Store
+	oauth         *auth.Service
+	quota         *quota.Service
+	pool          *accountpool.Pool
+	loader        *upstream.Loader
+	captcha       *captcha.Bridge
+	browser       *captcha.BrowserManager
+	proxy         *proxy.Service
+	queue         *requestqueue.Queue
+	http          *http.Server
+	logs          *logBuffer
+	reserve       *usageReserve
+	zcode         *zcodeBridge
+	zcodeApplyMu  sync.Mutex
+	zcodeApplySeq int64
 }
 
 const (
