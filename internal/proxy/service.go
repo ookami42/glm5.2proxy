@@ -200,10 +200,8 @@ func (s *Service) StreamWithAttemptLimit(ctx context.Context, upstreamConfig ups
 		emitted := false
 		finalEmitted := false
 		pendingFinish := ""
-		events := []StreamEvent{}
 		emitAttempt := func(event StreamEvent) error {
-			events = append(events, event)
-			return nil
+			return emit(event)
 		}
 		streamErr := readSSE(response.Body, func(event string, data []byte) error {
 			if string(data) == "[DONE]" || len(data) == 0 {
@@ -283,25 +281,18 @@ func (s *Service) StreamWithAttemptLimit(ctx context.Context, upstreamConfig ups
 		if streamErr == nil && emitted && !finalEmitted {
 			if pendingFinish != "" {
 				finalEmitted = true
-				events = append(events, StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
+				streamErr = emitAttempt(StreamEvent{Delta: map[string]any{}, FinishReason: pendingFinish})
 			} else {
 				streamErr = staleConnectionError()
 			}
 		}
-		if streamErr != nil && IsCaptchaChallenge(streamErr) && attempt < maxAttempts {
+		if streamErr != nil && !emitted && IsCaptchaChallenge(streamErr) && attempt < maxAttempts {
 			captchaRequired = true
 			continue
 		}
-		if streamErr != nil && retryable(streamErr) && attempt < maxAttempts {
+		if streamErr != nil && !emitted && retryable(streamErr) && attempt < maxAttempts {
 			s.waitWithLimit(ctx, attempt, maxAttempts, "retryable SSE error")
 			continue
-		}
-		if streamErr == nil {
-			for _, event := range events {
-				if err := emit(event); err != nil {
-					return attempt, err
-				}
-			}
 		}
 		return attempt, streamErr
 	}

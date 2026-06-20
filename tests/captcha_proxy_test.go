@@ -258,7 +258,7 @@ func TestProxyStreamingDoesNotEmitFalseStopBeforeEmptyStreamRetry(t *testing.T) 
 	}
 }
 
-func TestProxyStreamingRetriesPartialUpstreamBeforeClientEmission(t *testing.T) {
+func TestProxyStreamingDoesNotRetryAfterClientEmission(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.CaptchaEnabled = false
 	cfg.RetryBaseDelay = time.Millisecond
@@ -287,8 +287,8 @@ func TestProxyStreamingRetriesPartialUpstreamBeforeClientEmission(t *testing.T) 
 		}
 		return nil
 	})
-	if err != nil || attempts.Load() != 2 || streamAttempts != 2 || text != "recovered" || finishes != 1 {
-		t.Fatalf("partial stream recovery failed: text=%q finishes=%d attempts=%d streamAttempts=%d err=%v", text, finishes, attempts.Load(), streamAttempts, err)
+	if !proxy.IsStaleConnection(err) || attempts.Load() != 1 || streamAttempts != 1 || text != "broken" || finishes != 0 {
+		t.Fatalf("partial stream should stay on emitted attempt: text=%q finishes=%d attempts=%d streamAttempts=%d err=%v", text, finishes, attempts.Load(), streamAttempts, err)
 	}
 }
 
@@ -355,6 +355,51 @@ func TestProxyStreamingEvents(t *testing.T) {
 	})
 	if err != nil || content != "stream" || finishes != 1 {
 		t.Fatalf("unexpected raw stream events: content=%q finishes=%d err=%v", content, finishes, err)
+	}
+}
+
+func TestProxyStreamsFirstUsefulEventBeforeUpstreamFinishes(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.CaptchaEnabled = false
+	bridge := captcha.NewBridge(cfg)
+	firstWritten := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"live\"}}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(firstWritten)
+		<-releaseUpstream
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer mock.Close()
+	service := proxy.New(cfg, bridge)
+	received := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Stream(context.Background(), upstream.Config{Endpoint: mock.URL, BaseHeaders: map[string]string{"authorization": "Bearer test"}, HasAuthorization: true}, map[string]any{"model": "GLM-5.2"}, func(event proxy.StreamEvent) error {
+			if value, ok := event.Delta["content"].(string); ok {
+				received <- value
+			}
+			return nil
+		})
+		done <- err
+	}()
+	<-firstWritten
+	select {
+	case value := <-received:
+		if value != "live" {
+			t.Fatalf("unexpected first stream value: %q", value)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("proxy buffered the first useful stream event until upstream completion")
+	}
+	close(releaseUpstream)
+	if err := <-done; err != nil {
+		t.Fatalf("stream ended with error: %v", err)
 	}
 }
 
