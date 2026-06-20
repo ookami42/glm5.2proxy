@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -65,5 +66,24 @@ func TestQueueZCodeRefreshQueuesAvailableLiveRefresh(t *testing.T) {
 	}
 	if !server.zcode.Ack(commandID, true, "ok") {
 		t.Fatal("expected queued bridge command to ack")
+	}
+}
+
+func TestZCodeBridgeAckQuery(t *testing.T) {
+	server := &Server{zcode: newZCodeBridge(), logs: newLogBuffer(10)}
+	command := server.zcode.QueueRefresh("one", "Conta 1")
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/zcode/bridge/ack?commandId="+command.CommandID+"&ok=1&message=ok", nil)
+	recorder := httptest.NewRecorder()
+
+	server.zcodeBridgeAckQuery(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if pending := server.zcode.Next(); pending != nil {
+		t.Fatalf("expected command to be consumed, got %+v", pending)
+	}
+	if status := server.zcode.Status(); status.State != "applied" {
+		t.Fatalf("unexpected bridge status: %+v", status)
 	}
 }

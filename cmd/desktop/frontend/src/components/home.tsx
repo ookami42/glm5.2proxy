@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { useAccounts } from '@/hooks/use-accounts'
 import { useSettings } from '@/hooks/use-settings'
 import { api } from '@/lib/api'
-import type { Account, AccountActivateResponse, ThinkingSettings, ZCodeApplyResult } from '@/types/api'
+import type { Account, AccountActivateResponse, AccountDeleteResponse, ThinkingSettings, ZCodeApplyResult } from '@/types/api'
 
 function move(items: Account[], from: number, to: number): Account[] {
   const next = [...items]
@@ -39,14 +39,14 @@ function zcodeApplyMessage(result: ZCodeApplyResult): string {
     return 'Conta gravada no ZCode. O bridge nao confirmou o refresh live, entao o ZCode foi reiniciado para carregar a conta.'
   }
   if (result.liveRefreshQueued) {
-    return 'Conta gravada no ZCode e refresh live enfileirado. Com o bridge v2 instalado, a janela do ZCode recarrega sozinha para mostrar o perfil certo.'
+    return 'Conta gravada no ZCode e refresh live enfileirado. Com o bridge instalado, a janela do ZCode recarrega sozinha para mostrar o perfil certo.'
   }
   if (result.liveRefreshPossible) return 'Conta aplicada no ZCode e refresh live disponivel.'
   const suffix = result.liveRefreshReason ? ` Motivo: ${result.liveRefreshReason}` : ''
   return `Conta gravada no ZCode. A janela aberta pode continuar usando a credencial antiga ate o ZCode recarregar o runtime.${suffix}`
 }
 
-type AccountAction = { id: string; type: 'activate' | 'applyZCode' }
+type AccountAction = { id: string; type: 'activate' | 'applyZCode' | 'delete' }
 
 export function Home() {
   const { data: accountsData, loading, error: accountsError, refresh, reorder, quotaRefreshing } = useAccounts()
@@ -167,12 +167,29 @@ export function Home() {
     setZCodeSync((current) => ({ ...current, [id]: { status: 'syncing', message: 'Aplicando manualmente no ZCode...' } }))
     try {
       const response = await api.post<{ data: ZCodeApplyResult }>(`/api/admin/zcode/accounts/${id}/activate`)
+      setOptimisticActiveAccountId(response.data.account.id || id)
       setZCodeSync((current) => ({ ...current, [id]: { status: 'synced', message: zcodeApplyMessage(response.data) } }))
+      await refresh({ cancelInFlight: true })
     } catch (err) {
       setZCodeSync((current) => ({ ...current, [id]: { status: 'error', message: err instanceof Error ? err.message : 'Falha ao aplicar no ZCode' } }))
       throw err
     } finally {
       clearAccountAction(id, 'applyZCode')
+    }
+  }
+
+  const deleteAccount = async (id: string) => {
+    if (accountActionRef.current) return
+    setAccountAction({ id, type: 'delete' })
+    try {
+      const response = await api.delete<AccountDeleteResponse>(`/api/admin/accounts/${id}`)
+      setAccounts((current) => current.filter((account) => account.id !== id))
+      if (activeAccountId === id) {
+        setOptimisticActiveAccountId(response.activeAccount?.id ?? null)
+      }
+      await refresh({ cancelInFlight: true, includeQuota: true })
+    } finally {
+      clearAccountAction(id, 'delete')
     }
   }
 
@@ -351,11 +368,13 @@ export function Home() {
                     refreshing={refreshing || quotaRefreshing}
                     activatePending={accountAction?.id === account.id && accountAction.type === 'activate'}
                     zcodePending={accountAction?.id === account.id && accountAction.type === 'applyZCode'}
+                    deletePending={accountAction?.id === account.id && accountAction.type === 'delete'}
                     actionsDisabled={accountAction !== null}
                     globalThinking={settings?.globalThinking ?? null}
                     accountThinking={settings?.accountThinking?.[account.id] ?? null}
                     onActivate={() => activate(account.id)}
                     onApplyZCode={() => applyAccountInZCode(account.id)}
+                    onDelete={() => deleteAccount(account.id)}
                     onMoveUp={() => moveAccount(index, -1)}
                     onMoveDown={() => moveAccount(index, 1)}
                     onRefresh={refreshAccounts}

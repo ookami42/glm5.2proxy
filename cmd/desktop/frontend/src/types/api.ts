@@ -98,6 +98,17 @@ export interface AccountActivateResponse {
   }
 }
 
+export interface AccountDeleteResponse {
+  removed: boolean
+  accountId: string
+  activeAccount: Account | null
+  zcode?: {
+    synced: boolean
+    error: string | null
+    result: ZCodeApplyResult | null
+  }
+}
+
 export interface APIKey {
   id: string
   name: string

@@ -144,6 +144,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/admin/zcode/accounts/{id}/activate", s.activateAccountInZCode)
 	mux.HandleFunc("GET /api/admin/zcode/bridge/status", s.zcodeBridgeStatus)
 	mux.HandleFunc("GET /api/admin/zcode/bridge/next", s.zcodeBridgeNext)
+	mux.HandleFunc("GET /api/admin/zcode/bridge/ack", s.zcodeBridgeAckQuery)
 	mux.HandleFunc("POST /api/admin/zcode/bridge/ack", s.zcodeBridgeAck)
 	mux.HandleFunc("PUT /api/admin/accounts/order", s.reorderAccounts)
 	mux.HandleFunc("DELETE /api/admin/accounts/{id}", s.deleteAccountByPath)
@@ -741,6 +742,8 @@ func (s *Server) deleteAccountByPath(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) removeAccount(w http.ResponseWriter, id string) {
+	previousActive := s.accounts.Active()
+	removedActive := previousActive != nil && previousActive.ID == id
 	removed, err := s.accounts.Remove(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "storage_error")
@@ -752,7 +755,23 @@ func (s *Server) removeAccount(w http.ResponseWriter, id string) {
 	}
 	s.logs.add("warn", "account.removed", "Conta removida do pool")
 	_ = s.admin.SetAccountThinking(id, nil)
-	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "accountId": id})
+
+	var zcodeResult any
+	var zcodeErr error
+	nextActive := s.accounts.Active()
+	if removedActive && nextActive != nil {
+		zcodeResult, zcodeErr = s.applyAccountInZCode(nextActive.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"removed":       true,
+		"accountId":     id,
+		"activeAccount": sanitizePointer(nextActive),
+		"zcode": map[string]any{
+			"synced": zcodeErr == nil && zcodeResult != nil,
+			"error":  nullableError(zcodeErr),
+			"result": zcodeResult,
+		},
+	})
 }
 
 func (s *Server) captchaConfig(w http.ResponseWriter, r *http.Request) {

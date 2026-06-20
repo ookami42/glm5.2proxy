@@ -91,11 +91,13 @@ const (
 	bridgeMarkerV1 = "__GLM52_PROXY_BRIDGE__"
 	bridgeMarkerV2 = "__GLM52_PROXY_BRIDGE_RELOAD_V2__"
 	bridgeMarkerV3 = "__GLM52_PROXY_BRIDGE_RELOAD_V3__"
+	bridgeMarkerV5 = "__GLM52_PROXY_BRIDGE_RELOAD_V5__"
+	bridgeMarkerV6 = "__GLM52_PROXY_BRIDGE_RELOAD_V6__"
 )
 
-const requiredBridgeVersion = "v3"
+const requiredBridgeVersion = "v6"
 
-var codingPlanProviderIDs = []string{"builtin:zai-start-plan", "builtin:zai-coding-plan"}
+var codingPlanProviderIDs = []string{"builtin:zai-start-plan"}
 
 type codingPlanProviderConfig struct {
 	ModelBaseURL  string
@@ -176,10 +178,12 @@ func Detect() Environment {
 		env.BridgeInstalled = installed
 		env.BridgeVersion = version
 		env.BridgeProxyBaseURL = proxyBaseURL
-		env.LiveRefreshPossible = installed
-		if installed {
+		env.LiveRefreshPossible = installed && version == requiredBridgeVersion
+		if env.LiveRefreshPossible {
 			env.RestartRecommended = false
 			env.LiveRefreshReason = "Bridge do renderer detectado; o proxy consegue enfileirar o refresh e o ZCode recarrega a janela automaticamente."
+		} else if installed {
+			env.LiveRefreshReason = "Bridge do renderer detectado, mas em versao antiga (" + version + "). A proxima aplicacao de conta reinstala o patch atual."
 		}
 	} else if env.InstallPath != "" {
 		env.Warnings = append(env.Warnings, "Nao foi possivel verificar o bridge do ZCode: "+err.Error())
@@ -241,7 +245,7 @@ func ApplyAccountWithBridgeInEnvironment(env Environment, account accounts.Accou
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if _, err := clearCodingPlanCache(env.CodingPlanPath); err != nil {
+	if _, err := clearCodingPlanCache(env.CodingPlanPath, true); err != nil {
 		return ApplyResult{}, err
 	}
 	env.CredentialsPresent = true
@@ -284,15 +288,34 @@ func EnforceCodingPlanStateInEnvironment(env Environment, account accounts.Accou
 	if account.ZCodeJWTToken == "" {
 		return false, errors.New("conta sem zcodeJwtToken salvo")
 	}
+	current, err := codingPlanStateCurrent(env.ConfigPath, env.CodingPlanPath, account.ZCodeJWTToken)
+	if err != nil {
+		return false, err
+	}
+	if current {
+		return false, nil
+	}
 	configChanged, err := updateConfig(env.ConfigPath, account.ZCodeJWTToken)
 	if err != nil {
 		return false, err
 	}
-	cacheChanged, err := clearCodingPlanCache(env.CodingPlanPath)
+	cacheChanged, err := clearCodingPlanCache(env.CodingPlanPath, false)
 	if err != nil {
 		return false, err
 	}
 	return configChanged || cacheChanged, nil
+}
+
+func codingPlanStateCurrent(configPath, cachePath, jwt string) (bool, error) {
+	configCurrent, err := codingPlanConfigCurrent(configPath, jwt)
+	if err != nil || !configCurrent {
+		return configCurrent, err
+	}
+	cacheAvailable, err := codingPlanStartPlanAvailable(cachePath)
+	if err != nil {
+		return false, err
+	}
+	return cacheAvailable, nil
 }
 
 func ensureBridgeInstalled(env Environment, proxyBaseURL string) (BridgePatchResult, error) {
@@ -348,7 +371,7 @@ func ensureBridgeInstalled(env Environment, proxyBaseURL string) (BridgePatchRes
 	}
 	message := strings.TrimSpace(string(output))
 	if message == "" {
-		message = "Bridge v2 do ZCode instalado automaticamente."
+		message = "Bridge " + requiredBridgeVersion + " do ZCode instalado automaticamente."
 	}
 	return BridgePatchResult{
 		Installed:    true,
@@ -385,6 +408,12 @@ func detectBridge(env Environment) (bool, string, string, error) {
 	installed := false
 	version := ""
 	switch {
+	case bytes.Contains(raw, []byte(bridgeMarkerV6)):
+		installed = true
+		version = "v6"
+	case bytes.Contains(raw, []byte(bridgeMarkerV5)):
+		installed = true
+		version = "v5"
 	case bytes.Contains(raw, []byte(bridgeMarkerV3)):
 		installed = true
 		version = "v3"
@@ -571,7 +600,7 @@ func updateConfig(path, jwt string) (bool, error) {
 	return true, os.WriteFile(path, serialized, 0o600)
 }
 
-func clearCodingPlanCache(path string) (bool, error) {
+func clearCodingPlanCache(path string, force bool) (bool, error) {
 	if !fileExists(path) {
 		return false, nil
 	}
@@ -598,7 +627,14 @@ func clearCodingPlanCache(path string) (bool, error) {
 		return false, nil
 	}
 	changed := false
-	for _, providerID := range codingPlanProviderIDs {
+	providerIDs := codingPlanProviderIDs
+	if !force {
+		providerIDs = []string{"builtin:zai-start-plan"}
+	}
+	for _, providerID := range providerIDs {
+		if !force && !codingPlanCacheEntryBlocksPlan(items[providerID]) {
+			continue
+		}
 		if _, ok := items[providerID]; ok {
 			delete(items, providerID)
 			changed = true
@@ -613,6 +649,62 @@ func clearCodingPlanCache(path string) (bool, error) {
 		return false, err
 	}
 	return true, os.WriteFile(path, append(raw, '\n'), 0o600)
+}
+
+func codingPlanConfigCurrent(path, jwt string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	config := map[string]any{}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return false, err
+	}
+	providers, _ := config["modelProviders"].(map[string]any)
+	if !codingPlanProviderCurrent(providers["builtin:zai-start-plan"], jwt, codingPlanBaseURL) {
+		return false, nil
+	}
+	legacyProviders, _ := config["provider"].(map[string]any)
+	return codingPlanProviderCurrent(legacyProviders["builtin:zai-start-plan"], jwt, codingPlanBaseURL), nil
+}
+
+func codingPlanProviderCurrent(value any, jwt, baseURL string) bool {
+	provider, _ := value.(map[string]any)
+	if provider == nil || provider["enabled"] != true {
+		return false
+	}
+	options, _ := provider["options"].(map[string]any)
+	return options != nil && options["apiKey"] == jwt && options["baseURL"] == baseURL
+}
+
+func codingPlanStartPlanAvailable(path string) (bool, error) {
+	if !fileExists(path) {
+		return false, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	cache := map[string]any{}
+	if err := json.Unmarshal(raw, &cache); err != nil {
+		return false, err
+	}
+	entryStatus, _ := cache["entryStatus"].(map[string]any)
+	items, _ := entryStatus["items"].(map[string]any)
+	entry, _ := items["builtin:zai-start-plan"].(map[string]any)
+	return entry != nil && entry["status"] == "available", nil
+}
+
+func codingPlanCacheEntryBlocksPlan(value any) bool {
+	entry, _ := value.(map[string]any)
+	if entry == nil {
+		return false
+	}
+	status, _ := entry["status"].(string)
+	return status != "available"
 }
 
 func ensureObject(parent map[string]any, key string) map[string]any {

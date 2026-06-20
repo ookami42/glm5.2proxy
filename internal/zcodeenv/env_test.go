@@ -229,7 +229,7 @@ func TestClearCodingPlanCacheRemovesStaleEntries(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := clearCodingPlanCache(path)
+	changed, err := clearCodingPlanCache(path, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,6 +256,42 @@ func TestClearCodingPlanCacheRemovesStaleEntries(t *testing.T) {
 	}
 	if entryStatus["updatedAt"].(float64) <= 123 {
 		t.Fatal("updatedAt was not refreshed")
+	}
+}
+
+func TestClearCodingPlanCacheDoesNotLoopOnAvailableStartPlan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coding-plan-cache.json")
+	content := `{
+  "version": 1,
+  "entryStatus": {
+    "updatedAt": 123,
+    "items": {
+      "builtin:zai-start-plan": {
+        "status": "available"
+      },
+      "builtin:zai-coding-plan": {
+        "status": "unavailable",
+        "reason": "coding_plan_not_entitled"
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := clearCodingPlanCache(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("available start plan should not trigger cache repair")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != content {
+		t.Fatal("cache should not be rewritten")
 	}
 }
 
@@ -366,5 +402,69 @@ func TestEnforceCodingPlanStateInEnvironmentRepairsFiles(t *testing.T) {
 		if _, ok := items[providerID]; ok {
 			t.Fatalf("repaired cache still contains %s", providerID)
 		}
+	}
+}
+
+func TestEnforceCodingPlanStateNoopsWhenStartPlanAvailable(t *testing.T) {
+	dir := t.TempDir()
+	env := Environment{
+		HomeDir:        dir,
+		DataDir:        dir,
+		ConfigPath:     filepath.Join(dir, "config.json"),
+		CodingPlanPath: filepath.Join(dir, "coding-plan-cache.json"),
+	}
+	account := accounts.Account{
+		User:          accounts.User{UserID: "u1", Email: "u1@example.com", Name: "User 1"},
+		ZCodeJWTToken: "jwt-token",
+	}
+	if err := os.WriteFile(env.ConfigPath, []byte(`{
+  "provider": {
+    "builtin:zai-start-plan": {
+      "enabled": true,
+      "options": {
+        "apiKey": "jwt-token",
+        "baseURL": "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+      }
+    },
+    "builtin:zai-coding-plan": {
+      "enabled": false,
+      "systemDisabledReason": "coding_plan_not_entitled"
+    }
+  },
+  "modelProviders": {
+    "builtin:zai-start-plan": {
+      "enabled": true,
+      "options": {
+        "apiKey": "jwt-token",
+        "baseURL": "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+      }
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.CodingPlanPath, []byte(`{
+  "version": 1,
+  "entryStatus": {
+    "updatedAt": 1,
+    "items": {
+      "builtin:zai-start-plan": {
+        "status": "available"
+      },
+      "builtin:zai-coding-plan": {
+        "status": "unavailable",
+        "reason": "coding_plan_not_entitled"
+      }
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := EnforceCodingPlanStateInEnvironment(env, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("available start plan should not be repaired")
 	}
 }

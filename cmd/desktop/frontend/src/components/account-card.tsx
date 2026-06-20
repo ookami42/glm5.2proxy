@@ -15,7 +15,9 @@ import {
   RotateCcw,
   Save,
   SquareCode,
+  Trash2,
   UserRound,
+  X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -32,11 +34,13 @@ interface AccountCardProps {
   refreshing: boolean
   activatePending: boolean
   zcodePending: boolean
+  deletePending: boolean
   actionsDisabled: boolean
   globalThinking: ThinkingSettings | null
   accountThinking: ThinkingSettings | null
   onActivate: () => Promise<void>
   onApplyZCode: () => Promise<void>
+  onDelete: () => Promise<void>
   onMoveUp: () => void
   onMoveDown: () => void
   onRefresh: () => void
@@ -320,11 +324,13 @@ export function AccountCard({
   refreshing,
   activatePending,
   zcodePending,
+  deletePending,
   actionsDisabled,
   globalThinking,
   accountThinking,
   onActivate,
   onApplyZCode,
+  onDelete,
   onMoveUp,
   onMoveDown,
   onRefresh,
@@ -338,6 +344,8 @@ export function AccountCard({
   const displayName = account.user.name || account.label
   const email = account.user.email || account.user.id || account.id
   const [zcodeMessage, setZCodeMessage] = useState<string | null>(null)
+  const [deleteConfirming, setDeleteConfirming] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const effectiveZCodeStatus = zcodePending ? 'syncing' : zcodeSyncStatus
   const effectiveZCodeMessage = zcodeMessage ?? zcodeSyncMessage
   const activateTooltip = isActive
@@ -346,6 +354,14 @@ export function AccountCard({
   const applyZCodeTooltip = account.hasZcodeJwtToken
     ? 'So grava esta conta dentro do app ZCode detectado. Nao muda a conta ativa do proxy.'
     : 'Essa conta nao tem JWT salvo. Faca login novamente nela para conseguir aplicar no ZCode.'
+  const deleteTooltip = isActive
+    ? 'Remove esta conta do proxy. Se ela estiver ativa, o proxy escolhe a proxima conta salva e tenta sincronizar o ZCode.'
+    : 'Remove esta conta salva do proxy. Isso nao apaga a conta na Z.ai.'
+
+  useEffect(() => {
+    setDeleteConfirming(false)
+    setDeleteError(null)
+  }, [account.id])
 
   const activateAccount = async () => {
     if (isActive || activatePending || actionsDisabled) return
@@ -368,6 +384,16 @@ export function AccountCard({
       setZCodeMessage(null)
     } catch (err) {
       setZCodeMessage(err instanceof Error ? err.message : 'Nao foi possivel aplicar no ZCode')
+    }
+  }
+
+  const deleteAccount = async () => {
+    if (deletePending) return
+    setDeleteError(null)
+    try {
+      await onDelete()
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Nao foi possivel apagar a conta')
     }
   }
 
@@ -467,6 +493,46 @@ export function AccountCard({
                 <Button variant="ghost" size="icon" title="Mover para baixo" disabled={isLast} onClick={onMoveDown}>
                   <ArrowDown className="h-4 w-4" />
                 </Button>
+                {deleteConfirming ? (
+                  <div className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/7 p-1">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      disabled={deletePending}
+                      onClick={() => { void deleteAccount() }}
+                    >
+                      {deletePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                      Confirmar
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                      disabled={deletePending}
+                      onClick={() => {
+                        setDeleteConfirming(false)
+                        setDeleteError(null)
+                      }}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  <HoverHint content={deleteTooltip}>
+                    <span className="inline-flex">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:bg-red-500/10 hover:text-red-400"
+                        title="Apagar conta"
+                        disabled={actionsDisabled}
+                        onClick={() => setDeleteConfirming(true)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </span>
+                  </HoverHint>
+                )}
                 <HoverHint content={activateTooltip}>
                   <span className="inline-flex">
                     <Button
@@ -498,6 +564,11 @@ export function AccountCard({
             {zcodeMessage && (
               <p className="mt-3 rounded-md border border-sky-500/25 bg-sky-500/5 px-3 py-2 text-[11px] text-sky-300">
                 {zcodeMessage}
+              </p>
+            )}
+            {deleteError && (
+              <p className="mt-3 rounded-md border border-red-500/25 bg-red-500/5 px-3 py-2 text-[11px] text-red-400">
+                {deleteError}
               </p>
             )}
             <div

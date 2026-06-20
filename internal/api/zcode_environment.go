@@ -16,6 +16,15 @@ func (s *Server) zcodeEnvironment(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) activateAccountInZCode(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	activated, err := s.accounts.Activate(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "storage_error")
+		return
+	}
+	if activated == nil {
+		writeError(w, http.StatusNotFound, "account not found", "not_found")
+		return
+	}
 	account := s.accounts.Get(id)
 	if account == nil {
 		writeError(w, http.StatusNotFound, "account not found", "not_found")

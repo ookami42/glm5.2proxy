@@ -147,6 +147,13 @@ func (s *Server) zcodeBridgeNext(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "zcode.bridge_next", "data": map[string]any{"command": s.zcode.Next()}})
 }
 
+func (s *Server) zcodeBridgeAckQuery(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	commandID := query.Get("commandId")
+	ok := query.Get("ok") == "1" || query.Get("ok") == "true"
+	s.handleZCodeBridgeAck(w, commandID, ok, query.Get("message"))
+}
+
 func (s *Server) zcodeBridgeAck(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		CommandID string `json:"commandId"`
@@ -157,17 +164,21 @@ func (s *Server) zcodeBridgeAck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if !s.zcode.Ack(body.CommandID, body.OK, body.Message) {
+	s.handleZCodeBridgeAck(w, body.CommandID, body.OK, body.Message)
+}
+
+func (s *Server) handleZCodeBridgeAck(w http.ResponseWriter, commandID string, ok bool, message string) {
+	if !s.zcode.Ack(commandID, ok, message) {
 		writeError(w, http.StatusNotFound, "bridge command not found", "not_found")
 		return
 	}
 	event := "zcode.bridge_refresh_failed"
 	level := "warn"
-	if body.OK {
+	if ok {
 		event = "zcode.bridge_refresh_applied"
 		level = "info"
 	}
-	s.logs.add(level, event, body.Message)
+	s.logs.add(level, event, message)
 	writeJSON(w, http.StatusOK, map[string]any{"object": "zcode.bridge_ack", "ok": true})
 }
 
