@@ -184,6 +184,9 @@ func (s *Service) ModelBalanceCached(ctx context.Context, upstreamConfig upstrea
 	if !upstreamConfig.HasAuthorization {
 		return nil, nil
 	}
+	if usesUsageQuota(upstreamConfig) {
+		return s.ModelBalance(ctx, upstreamConfig, model)
+	}
 	if maxAge <= 0 {
 		return s.ModelBalance(ctx, upstreamConfig, model)
 	}

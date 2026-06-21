@@ -733,3 +733,107 @@ func TestAPIStateReorderAndLogs(t *testing.T) {
 		t.Fatalf("expected real administrative logs, got %+v", logs)
 	}
 }
+
+func TestAccountRepairRemovesBrokenAccountWithEmptyStartPlan(t *testing.T) {
+	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
+		case "/billing/balance":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fakeUpstream.Close()
+
+	cfg := testConfig(t)
+	cfg.BillingBaseURL = fakeUpstream.URL + "/billing"
+	admin, _ := state.NewAdminStore(cfg.AdminPath, 3005, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"})
+	accountStore, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	_, _ = accountStore.Upsert(accounts.User{UserID: "broken", Email: "broken@example.test"}, "broken-token", "")
+	loader := upstream.NewLoader(cfg, accountStore)
+	quotaService := quota.New(cfg)
+	bridge := captcha.NewBridge(cfg)
+	browser := captcha.NewBrowserManager(cfg, 3005)
+	server := api.New(cfg, 3005, admin, accountStore, auth.New(cfg, accountStore), quotaService, accountpool.New(cfg, accountStore, loader, quotaService), loader, bridge, browser, proxy.New(cfg, bridge))
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	response, err := http.Post(httpServer.URL+"/api/admin/accounts/repair", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var report map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || int(report["removed"].(float64)) != 1 {
+		t.Fatalf("expected one removed account, status=%d report=%+v", response.StatusCode, report)
+	}
+	if accountStore.Get("broken") != nil {
+		t.Fatal("broken account should have been removed")
+	}
+	logsResponse, _ := http.Get(httpServer.URL + "/api/admin/logs")
+	var logs map[string]any
+	_ = json.NewDecoder(logsResponse.Body).Decode(&logs)
+	logsResponse.Body.Close()
+	found := false
+	for _, raw := range logs["data"].([]any) {
+		entry := raw.(map[string]any)
+		if entry["event"] == "account_repair.account_removed" && strings.Contains(entry["message"].(string), "Start Plan") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected account repair removal log, got %+v", logs)
+	}
+}
+
+func TestAccountRepairKeepsExhaustedAccountWithRealBalance(t *testing.T) {
+	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
+		case "/billing/balance":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":3000000,"remaining_units":0,"available_units":0}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fakeUpstream.Close()
+
+	cfg := testConfig(t)
+	cfg.BillingBaseURL = fakeUpstream.URL + "/billing"
+	admin, _ := state.NewAdminStore(cfg.AdminPath, 3005, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"})
+	accountStore, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	_, _ = accountStore.Upsert(accounts.User{UserID: "exhausted", Email: "exhausted@example.test"}, "exhausted-token", "")
+	loader := upstream.NewLoader(cfg, accountStore)
+	quotaService := quota.New(cfg)
+	bridge := captcha.NewBridge(cfg)
+	browser := captcha.NewBrowserManager(cfg, 3005)
+	server := api.New(cfg, 3005, admin, accountStore, auth.New(cfg, accountStore), quotaService, accountpool.New(cfg, accountStore, loader, quotaService), loader, bridge, browser, proxy.New(cfg, bridge))
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	response, err := http.Post(httpServer.URL+"/api/admin/accounts/repair", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var report map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || int(report["healthy"].(float64)) != 1 || int(report["removed"].(float64)) != 0 {
+		t.Fatalf("expected exhausted-but-real account to stay healthy, status=%d report=%+v", response.StatusCode, report)
+	}
+	if accountStore.Get("exhausted") == nil {
+		t.Fatal("exhausted account with real balance should not be removed")
+	}
+}

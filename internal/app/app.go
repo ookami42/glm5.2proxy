@@ -63,6 +63,11 @@ func (s *Service) Run(ctx context.Context) error {
 		defer cancel()
 		s.server.SelectStartupAccount(startupCtx)
 	}()
+	go func() {
+		repairCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		defer cancel()
+		s.server.RepairBrokenAccounts(repairCtx, "startup")
+	}()
 	select {
 	case err := <-errorChannel:
 		s.browser.Stop()

@@ -152,3 +152,39 @@ func TestModelBalanceCachedCoalescesConcurrentRequests(t *testing.T) {
 		t.Fatalf("expected one coalesced balance request, got %d", balanceCalls.Load())
 	}
 }
+
+func TestModelBalanceCachedUsesUsageQuotaEndpointWhenConfigured(t *testing.T) {
+	var quotaCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/usage/quota/limit" {
+			t.Errorf("unexpected billing endpoint call: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "coding-key.secret" {
+			t.Errorf("unexpected quota authorization: %s", r.Header.Get("Authorization"))
+		}
+		quotaCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"limits":[{"type":"model_usage","number":3000000,"remaining":123,"usageDetails":[{"modelCode":"GLM-5.2","usage":42}]}]}}`))
+	}))
+	defer server.Close()
+
+	service := New(config.Config{BillingBaseURL: "http://127.0.0.1/should-not-be-used", AppVersion: "3.1.2"})
+	model := models.Model{ID: "glm-5.2", UpstreamID: "GLM-5.2"}
+	balance, err := service.ModelBalanceCached(context.Background(), upstream.Config{
+		QuotaEndpoint:      server.URL + "/usage/quota/limit",
+		QuotaAuthorization: "coding-key.secret",
+		BaseHeaders:        map[string]string{"user-agent": "ZCode/3.1.2"},
+		HasAuthorization:   true,
+	}, model, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance == nil || balance.Available == nil || *balance.Available != 123 {
+		t.Fatalf("unexpected usage quota balance: %+v", balance)
+	}
+	if quotaCalls.Load() != 1 {
+		t.Fatalf("expected one usage quota request, got %d", quotaCalls.Load())
+	}
+}

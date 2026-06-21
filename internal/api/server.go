@@ -48,6 +48,7 @@ type Server struct {
 	zcode         *zcodeBridge
 	zcodeApplyMu  sync.Mutex
 	zcodeApplySeq int64
+	repairMu      sync.Mutex
 }
 
 const (
@@ -141,6 +142,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/accounts/{id}/thinking", s.deleteAccountThinking)
 	mux.HandleFunc("GET /api/admin/models/capabilities", s.modelCapabilities)
 	mux.HandleFunc("GET /api/admin/accounts", s.listAccounts)
+	mux.HandleFunc("POST /api/admin/accounts/repair", s.repairAccounts)
 	mux.HandleFunc("GET /api/admin/accounts/{id}", s.getAccount)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/activate", s.activateAccountByPath)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/coding-plan/refresh", s.refreshAccountCodingPlan)
@@ -927,57 +929,21 @@ func (s *Server) refreshAccountCodingPlan(w http.ResponseWriter, r *http.Request
 	}
 	started := time.Now()
 	s.logs.add("info", "coding_plan.refresh_started", "Atualizando Coding Plan direto pelo proxy para "+accounts.Sanitize(*account).Label)
-	result, err := s.codingPlan.Refresh(r.Context(), *account)
+	outcome, err := s.refreshCodingPlanForAccount(r.Context(), *account)
 	elapsed := time.Since(started)
 	if err != nil {
 		s.logs.add("warn", "coding_plan.refresh_failed", fmt.Sprintf("Falha ao atualizar Coding Plan direto pelo proxy para %s apos %s: %s", accounts.Sanitize(*account).Label, elapsed, err))
 		writeError(w, http.StatusBadGateway, err.Error(), "zai_coding_plan_refresh_failed")
 		return
 	}
-	credentialStored := false
-	if result.Credential != "" {
-		quotaSnapshot, err := s.quota.BalanceSnapshot(r.Context(), upstream.Config{
-			QuotaEndpoint:      s.cfg.ZAIUsageQuotaURL,
-			QuotaAuthorization: result.Credential,
-			BaseHeaders:        map[string]string{"user-agent": "ZCode/" + s.cfg.AppVersion},
-			HasAuthorization:   true,
-		})
-		if err != nil || len(quotaSnapshot.Balances) == 0 {
-			if err != nil {
-				result.QuotaError = err.Error()
-			} else {
-				result.QuotaError = "coding plan quota returned no balances"
-			}
-			if _, clearErr := s.accounts.UpdateCodingPlanAPIKey(account.ID, ""); clearErr != nil {
-				s.logs.add("warn", "coding_plan.refresh_clear_failed", fmt.Sprintf("Coding Plan nao confirmou quota para %s e falhou ao limpar credencial antiga: %s", accounts.Sanitize(*account).Label, clearErr))
-			}
-			s.logs.add("warn", "coding_plan.quota_not_entitled", fmt.Sprintf("Coding Plan API key resolvida para %s, mas quota nao foi confirmada: %s", accounts.Sanitize(*account).Label, result.QuotaError))
-		} else {
-			result.QuotaVerified = true
-			if _, err := s.accounts.UpdateCodingPlanAPIKey(account.ID, result.Credential); err != nil {
-				s.logs.add("warn", "coding_plan.refresh_store_failed", fmt.Sprintf("Coding Plan resolvido para %s, mas falhou ao salvar credencial: %s", accounts.Sanitize(*account).Label, err))
-				writeError(w, http.StatusInternalServerError, err.Error(), "zai_coding_plan_store_failed")
-				return
-			}
-			credentialStored = true
-		}
+	result := outcome.Result
+	if result.QuotaError != "" {
+		s.logs.add("warn", "coding_plan.quota_not_entitled", fmt.Sprintf("Coding Plan API key resolvida para %s, mas quota nao foi confirmada: %s", accounts.Sanitize(*account).Label, result.QuotaError))
 	}
-
-	startPlanAccount := *account
-	startPlanAccount.CodingPlanAPIKey = ""
-	startPlanSnapshot, err := s.quota.Snapshot(r.Context(), s.loader.Load(&startPlanAccount))
-	if err != nil {
-		result.StartPlanError = err.Error()
-		s.logs.add("warn", "start_plan.refresh_failed", fmt.Sprintf("Start Plan nao confirmou cota para %s apos refresh direto: %s", accounts.Sanitize(*account).Label, err))
-	} else {
-		result.StartPlanVerified = len(startPlanSnapshot.Balances) > 0
-		if !result.StartPlanVerified {
-			result.StartPlanError = "start plan returned no balances"
-			s.logs.add("warn", "start_plan.refresh_empty", fmt.Sprintf("Start Plan retornou sem balances para %s apos refresh direto", accounts.Sanitize(*account).Label))
-		}
+	if result.StartPlanError != "" {
+		s.logs.add("warn", "start_plan.refresh_failed", fmt.Sprintf("Start Plan nao confirmou cota para %s apos refresh direto: %s", accounts.Sanitize(*account).Label, result.StartPlanError))
 	}
-
-	s.logs.add("info", "coding_plan.refresh_completed", fmt.Sprintf("Coding Plan atualizado direto pelo proxy para %s em %s; organization=%s project=%s api_key=%s created=%t secret_resolved=%t quota_verified=%t start_plan_verified=%t credential_stored=%t", accounts.Sanitize(*account).Label, elapsed, result.OrganizationID, result.ProjectID, result.APIKeyName, result.APIKeyCreated, result.SecretResolved, result.QuotaVerified, result.StartPlanVerified, credentialStored))
+	s.logs.add("info", "coding_plan.refresh_completed", fmt.Sprintf("Coding Plan atualizado direto pelo proxy para %s em %s; organization=%s project=%s api_key=%s created=%t secret_resolved=%t quota_verified=%t start_plan_verified=%t credential_stored=%t", accounts.Sanitize(*account).Label, elapsed, result.OrganizationID, result.ProjectID, result.APIKeyName, result.APIKeyCreated, result.SecretResolved, result.QuotaVerified, result.StartPlanVerified, outcome.CredentialStored))
 	writeJSON(w, http.StatusOK, map[string]any{"object": "zai.coding_plan_refresh", "account": accounts.Sanitize(*account), "data": result})
 }
 
