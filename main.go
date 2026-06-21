@@ -14,6 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"glm5.2proxy/internal/app"
 )
@@ -27,13 +28,14 @@ type Desktop struct {
 	done    chan struct{}
 }
 
-func (d *Desktop) startup(_ context.Context) {
+func (d *Desktop) startup(wailsCtx context.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
 	go func() {
 		defer close(d.done)
 		if err := d.service.Run(ctx); err != nil {
 			log.Printf("backend stopped: %v", err)
+			wailsruntime.Quit(wailsCtx)
 		}
 	}()
 }
