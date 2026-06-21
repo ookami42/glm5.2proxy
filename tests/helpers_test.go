@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"encoding/json"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -25,4 +27,13 @@ func testConfig(t *testing.T) config.Config {
 		QuotaRefreshDelay: time.Millisecond, QuotaRefreshAttempts: 1,
 		DefaultMaxTokens: 64000, DefaultThinkingEnabled: true, DefaultThinkingBudget: 32000, DefaultEffort: "max",
 	}
+}
+
+func writeEmptyBillingCurrent(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/billing/current" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"plans": []any{}}})
+	return true
 }

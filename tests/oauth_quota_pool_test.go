@@ -100,6 +100,9 @@ func TestAccountPoolRotatesBeforeChatWhenActiveQuotaIsExhausted(t *testing.T) {
 	var checkedTokens []string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
 		if r.URL.Path != "/billing/balance" {
 			http.NotFound(w, r)
 			return
@@ -139,6 +142,9 @@ func TestAccountPoolRotatesWhenAvailableIsBelowRequestReserve(t *testing.T) {
 	var checkedTokens []string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
 		if r.URL.Path != "/billing/balance" {
 			http.NotFound(w, r)
 			return
@@ -175,6 +181,9 @@ func TestAccountPoolRotatesWhenAvailableIsBelowRequestReserve(t *testing.T) {
 func TestAccountPoolPrefersLessUsedAccountBeforeHigherTokenAccount(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
 		if r.URL.Path != "/billing/balance" {
 			http.NotFound(w, r)
 			return
@@ -213,6 +222,9 @@ func TestAccountPoolPrefersLessUsedAccountBeforeHigherTokenAccount(t *testing.T)
 func TestAccountPoolSelectForRequestPicksHighestQuotaThatCoversRequest(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
 		if r.URL.Path != "/billing/balance" {
 			http.NotFound(w, r)
 			return
@@ -248,5 +260,34 @@ func TestAccountPoolSelectForRequestPicksHighestQuotaThatCoversRequest(t *testin
 	}
 	if !strings.Contains(selection.Reason, "maior cota") {
 		t.Fatalf("selection reason should explain quota-first choice: %q", selection.Reason)
+	}
+}
+
+func TestAccountPoolSelectBestEffortIgnoresPreventiveQuotaCutoff(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
+		if r.URL.Path != "/billing/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"balances": []any{map[string]any{"show_name": "GLM-5.2", "total_units": 3000000, "used_units": 2999999, "remaining_units": 1, "available_units": 1}}}})
+	}))
+	defer mock.Close()
+
+	cfg := testConfig(t)
+	cfg.BillingBaseURL = mock.URL + "/billing"
+	cfg.AccountMinAvailable = 96000
+	store, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	_, _ = store.Upsert(accounts.User{UserID: "low"}, "low-token", "")
+
+	loader := upstream.NewLoader(cfg, store)
+	pool := accountpool.New(cfg, store, loader, quota.New(cfg))
+	model, _ := models.Resolve("glm-5.2")
+	selection := pool.SelectBestEffort(context.Background(), model, nil)
+	if selection.Account == nil || selection.Account.ID != "low" || selection.AllExhausted {
+		t.Fatalf("expected best-effort mode to try saved account below cutoff: %+v", selection)
 	}
 }

@@ -100,6 +100,11 @@ func TestSnapshotCachedReusesFreshSnapshot(t *testing.T) {
 func TestModelBalanceCachedCoalescesConcurrentRequests(t *testing.T) {
 	var balanceCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/current" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
+			return
+		}
 		if r.URL.Path != "/balance" {
 			http.NotFound(w, r)
 			return

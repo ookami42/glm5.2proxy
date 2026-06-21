@@ -97,7 +97,7 @@ const (
 
 const requiredBridgeVersion = "v6"
 
-var codingPlanProviderIDs = []string{"builtin:zai-start-plan"}
+var codingPlanProviderIDs = []string{"builtin:zai-start-plan", "builtin:zai-coding-plan"}
 
 type codingPlanProviderConfig struct {
 	ModelBaseURL  string
@@ -627,11 +627,7 @@ func clearCodingPlanCache(path string, force bool) (bool, error) {
 		return false, nil
 	}
 	changed := false
-	providerIDs := codingPlanProviderIDs
-	if !force {
-		providerIDs = []string{"builtin:zai-start-plan"}
-	}
-	for _, providerID := range providerIDs {
+	for _, providerID := range codingPlanProviderIDs {
 		if !force && !codingPlanCacheEntryBlocksPlan(items[providerID]) {
 			continue
 		}

@@ -259,7 +259,7 @@ func TestClearCodingPlanCacheRemovesStaleEntries(t *testing.T) {
 	}
 }
 
-func TestClearCodingPlanCacheDoesNotLoopOnAvailableStartPlan(t *testing.T) {
+func TestClearCodingPlanCacheDoesNotRewriteAvailableEntries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "coding-plan-cache.json")
 	content := `{
   "version": 1,
@@ -270,8 +270,7 @@ func TestClearCodingPlanCacheDoesNotLoopOnAvailableStartPlan(t *testing.T) {
         "status": "available"
       },
       "builtin:zai-coding-plan": {
-        "status": "unavailable",
-        "reason": "coding_plan_not_entitled"
+        "status": "available"
       }
     }
   }
@@ -284,7 +283,7 @@ func TestClearCodingPlanCacheDoesNotLoopOnAvailableStartPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	if changed {
-		t.Fatal("available start plan should not trigger cache repair")
+		t.Fatal("available coding plan entries should not trigger cache repair")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -427,12 +426,22 @@ func TestEnforceCodingPlanStateNoopsWhenStartPlanAvailable(t *testing.T) {
       }
     },
     "builtin:zai-coding-plan": {
-      "enabled": false,
-      "systemDisabledReason": "coding_plan_not_entitled"
+      "enabled": true,
+      "options": {
+        "apiKey": "jwt-token",
+        "baseURL": "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+      }
     }
   },
   "modelProviders": {
     "builtin:zai-start-plan": {
+      "enabled": true,
+      "options": {
+        "apiKey": "jwt-token",
+        "baseURL": "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+      }
+    },
+    "builtin:zai-coding-plan": {
       "enabled": true,
       "options": {
         "apiKey": "jwt-token",
@@ -452,8 +461,7 @@ func TestEnforceCodingPlanStateNoopsWhenStartPlanAvailable(t *testing.T) {
         "status": "available"
       },
       "builtin:zai-coding-plan": {
-        "status": "unavailable",
-        "reason": "coding_plan_not_entitled"
+        "status": "available"
       }
     }
   }

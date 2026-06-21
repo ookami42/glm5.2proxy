@@ -281,6 +281,9 @@ func TestChatRequestsAreQueuedPerDefaultAccountAndModel(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
 			atomic.AddInt32(&active, -1)
+		case r.URL.Path == "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
 		case r.URL.Path == "/billing/balance":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000}]}}`))
@@ -349,6 +352,9 @@ func TestChatRotatesAccountWhenUpstreamReportsQuotaExhausted(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
 			_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case r.URL.Path == "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
 		case r.URL.Path == "/billing/balance":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000}]}}`))
@@ -407,6 +413,9 @@ func TestChatRotatesAccountWhenUpstreamReportsExpiredAuth(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
 			_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case r.URL.Path == "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
 		case r.URL.Path == "/billing/balance":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000}]}}`))
@@ -460,6 +469,9 @@ func TestChatRotatesAccountAfterPerAccountStaleLimit(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
 			_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case r.URL.Path == "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
 		case r.URL.Path == "/billing/balance":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000}]}}`))
@@ -534,6 +546,9 @@ func TestChatRetriesStaleAccountAfterAllAccountsCooldown(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
 			_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case r.URL.Path == "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
 		case r.URL.Path == "/billing/balance":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000}]}}`))
@@ -602,6 +617,9 @@ func TestAdmissionConcurrencyErrorUsesFriendlyMessage(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":{"message":"model admission concurrency limit exceeded","type":"zcode_upstream_error","code":"3001"}}`))
+		case r.URL.Path == "/billing/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"plans":[]}}`))
 		case r.URL.Path == "/billing/balance":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[{"show_name":"GLM-5.2","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000}]}}`))

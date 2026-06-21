@@ -17,6 +17,7 @@ import (
 	"glm5.2proxy/internal/accounts"
 	"glm5.2proxy/internal/auth"
 	"glm5.2proxy/internal/captcha"
+	"glm5.2proxy/internal/codingplan"
 	"glm5.2proxy/internal/config"
 	"glm5.2proxy/internal/models"
 	"glm5.2proxy/internal/openai"
@@ -38,6 +39,7 @@ type Server struct {
 	loader        *upstream.Loader
 	captcha       *captcha.Bridge
 	browser       *captcha.BrowserManager
+	codingPlan    *codingplan.Service
 	proxy         *proxy.Service
 	queue         *requestqueue.Queue
 	creator       *accountcreator.Runner
@@ -66,7 +68,7 @@ func New(
 	browser *captcha.BrowserManager,
 	proxyService *proxy.Service,
 ) *Server {
-	server := &Server{cfg: cfg, port: port, admin: admin, accounts: accountStore, oauth: oauth, quota: quotaService, pool: pool, loader: loader, captcha: bridge, browser: browser, proxy: proxyService, queue: requestqueue.New(), creator: accountcreator.New(cfg), logs: newLogBuffer(500), zcode: newZCodeBridge()}
+	server := &Server{cfg: cfg, port: port, admin: admin, accounts: accountStore, oauth: oauth, quota: quotaService, pool: pool, loader: loader, captcha: bridge, browser: browser, codingPlan: codingplan.New(cfg), proxy: proxyService, queue: requestqueue.New(), creator: accountcreator.New(cfg), logs: newLogBuffer(500), zcode: newZCodeBridge()}
 	server.http = &http.Server{Addr: net.JoinHostPort(cfg.Host, strconv.Itoa(port)), Handler: server.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	return server
 }
@@ -141,6 +143,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/admin/accounts", s.listAccounts)
 	mux.HandleFunc("GET /api/admin/accounts/{id}", s.getAccount)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/activate", s.activateAccountByPath)
+	mux.HandleFunc("POST /api/admin/accounts/{id}/coding-plan/refresh", s.refreshAccountCodingPlan)
 	mux.HandleFunc("GET /api/admin/zcode/environment", s.zcodeEnvironment)
 	mux.HandleFunc("POST /api/admin/zcode/accounts/{id}/activate", s.activateAccountInZCode)
 	mux.HandleFunc("GET /api/admin/zcode/bridge/status", s.zcodeBridgeStatus)
@@ -220,19 +223,32 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	var staleNotice *accountSwitchNotice
 	accountCreationAttempted := false
+	bestEffortExistingAccounts := false
 	baseRequirement := openai.EstimateTokenRequirement(body, openai.ToAnthropic(body, nil, model, s.admin.ThinkingFor(""), s.cfg.DefaultMaxTokens))
 	for {
 		previousActive := s.accounts.Active()
 		selection := s.pool.SelectForRequest(r.Context(), model, baseRequirement.Total, skipMask(skipped))
+		if bestEffortExistingAccounts {
+			selection = s.pool.SelectBestEffort(r.Context(), model, skipMask(skipped))
+		}
 		if selection.AllExhausted {
 			if s.releaseExpiredAccountSkips(requestID, skipped) {
 				staleNotice = nil
 				continue
 			}
-			if !accountCreationAttempted && s.tryCreateAccountForRequest(r.Context(), requestID, model, baseRequirement, selection.Available) {
+			if !accountCreationAttempted {
 				accountCreationAttempted = true
+				if s.tryCreateAccountForRequest(r.Context(), requestID, model, baseRequirement, selection.Available) {
+					skipped = map[string]accountSkip{}
+					staleNotice = nil
+					continue
+				}
+			}
+			if !bestEffortExistingAccounts {
+				bestEffortExistingAccounts = true
 				skipped = map[string]accountSkip{}
 				staleNotice = nil
+				s.logs.add("warn", "account_creator.fallback_existing_accounts", fmt.Sprintf("Request %s nao conseguiu acionar a criacao automatica ou ela nao resolveria; tentando novamente as contas salvas em modo best-effort antes de encerrar", requestID))
 				continue
 			}
 			if s.allAccountsSkipped(skipped) && s.hasRetryableAccountSkip(skipped) {
@@ -271,7 +287,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		thinking := s.admin.ThinkingFor(accountID)
 		upstreamBody := openai.ToAnthropic(body, selection.Config.BodyTemplate, model, thinking, s.cfg.DefaultMaxTokens)
 		requirement := openai.EstimateTokenRequirement(body, upstreamBody)
-		if accountID != "" && selection.Balance != nil && selection.Balance.Available != nil && *selection.Balance.Available < requirement.Total {
+		if !bestEffortExistingAccounts && accountID != "" && selection.Balance != nil && selection.Balance.Available != nil && *selection.Balance.Available < requirement.Total {
 			s.blockAccount(skipped, accountID, accounts.Sanitize(*selection.Account).Label, "cota insuficiente para request", false)
 			s.logs.add(
 				"warn",
@@ -900,6 +916,69 @@ func (s *Server) activate(w http.ResponseWriter, id string) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"activeAccount": account,
 	})
+}
+
+func (s *Server) refreshAccountCodingPlan(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	account := s.accounts.Get(id)
+	if account == nil {
+		writeError(w, http.StatusNotFound, "account not found", "not_found")
+		return
+	}
+	started := time.Now()
+	s.logs.add("info", "coding_plan.refresh_started", "Atualizando Coding Plan direto pelo proxy para "+accounts.Sanitize(*account).Label)
+	result, err := s.codingPlan.Refresh(r.Context(), *account)
+	elapsed := time.Since(started)
+	if err != nil {
+		s.logs.add("warn", "coding_plan.refresh_failed", fmt.Sprintf("Falha ao atualizar Coding Plan direto pelo proxy para %s apos %s: %s", accounts.Sanitize(*account).Label, elapsed, err))
+		writeError(w, http.StatusBadGateway, err.Error(), "zai_coding_plan_refresh_failed")
+		return
+	}
+	credentialStored := false
+	if result.Credential != "" {
+		quotaSnapshot, err := s.quota.BalanceSnapshot(r.Context(), upstream.Config{
+			QuotaEndpoint:      s.cfg.ZAIUsageQuotaURL,
+			QuotaAuthorization: result.Credential,
+			BaseHeaders:        map[string]string{"user-agent": "ZCode/" + s.cfg.AppVersion},
+			HasAuthorization:   true,
+		})
+		if err != nil || len(quotaSnapshot.Balances) == 0 {
+			if err != nil {
+				result.QuotaError = err.Error()
+			} else {
+				result.QuotaError = "coding plan quota returned no balances"
+			}
+			if _, clearErr := s.accounts.UpdateCodingPlanAPIKey(account.ID, ""); clearErr != nil {
+				s.logs.add("warn", "coding_plan.refresh_clear_failed", fmt.Sprintf("Coding Plan nao confirmou quota para %s e falhou ao limpar credencial antiga: %s", accounts.Sanitize(*account).Label, clearErr))
+			}
+			s.logs.add("warn", "coding_plan.quota_not_entitled", fmt.Sprintf("Coding Plan API key resolvida para %s, mas quota nao foi confirmada: %s", accounts.Sanitize(*account).Label, result.QuotaError))
+		} else {
+			result.QuotaVerified = true
+			if _, err := s.accounts.UpdateCodingPlanAPIKey(account.ID, result.Credential); err != nil {
+				s.logs.add("warn", "coding_plan.refresh_store_failed", fmt.Sprintf("Coding Plan resolvido para %s, mas falhou ao salvar credencial: %s", accounts.Sanitize(*account).Label, err))
+				writeError(w, http.StatusInternalServerError, err.Error(), "zai_coding_plan_store_failed")
+				return
+			}
+			credentialStored = true
+		}
+	}
+
+	startPlanAccount := *account
+	startPlanAccount.CodingPlanAPIKey = ""
+	startPlanSnapshot, err := s.quota.Snapshot(r.Context(), s.loader.Load(&startPlanAccount))
+	if err != nil {
+		result.StartPlanError = err.Error()
+		s.logs.add("warn", "start_plan.refresh_failed", fmt.Sprintf("Start Plan nao confirmou cota para %s apos refresh direto: %s", accounts.Sanitize(*account).Label, err))
+	} else {
+		result.StartPlanVerified = len(startPlanSnapshot.Balances) > 0
+		if !result.StartPlanVerified {
+			result.StartPlanError = "start plan returned no balances"
+			s.logs.add("warn", "start_plan.refresh_empty", fmt.Sprintf("Start Plan retornou sem balances para %s apos refresh direto", accounts.Sanitize(*account).Label))
+		}
+	}
+
+	s.logs.add("info", "coding_plan.refresh_completed", fmt.Sprintf("Coding Plan atualizado direto pelo proxy para %s em %s; organization=%s project=%s api_key=%s created=%t secret_resolved=%t quota_verified=%t start_plan_verified=%t credential_stored=%t", accounts.Sanitize(*account).Label, elapsed, result.OrganizationID, result.ProjectID, result.APIKeyName, result.APIKeyCreated, result.SecretResolved, result.QuotaVerified, result.StartPlanVerified, credentialStored))
+	writeJSON(w, http.StatusOK, map[string]any{"object": "zai.coding_plan_refresh", "account": accounts.Sanitize(*account), "data": result})
 }
 
 func (s *Server) reorderAccounts(w http.ResponseWriter, r *http.Request) {

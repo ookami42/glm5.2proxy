@@ -15,14 +15,16 @@ import (
 )
 
 type Config struct {
-	Endpoint         string
-	BaseHeaders      map[string]string
-	BodyTemplate     map[string]any
-	Source           string
-	AccountID        string
-	ActiveAccount    *accounts.PublicAccount
-	HasAuthorization bool
-	HasCaptcha       bool
+	Endpoint           string
+	BaseHeaders        map[string]string
+	BodyTemplate       map[string]any
+	Source             string
+	AccountID          string
+	QuotaEndpoint      string
+	QuotaAuthorization string
+	ActiveAccount      *accounts.PublicAccount
+	HasAuthorization   bool
+	HasCaptcha         bool
 }
 
 type Loader struct {
@@ -69,10 +71,18 @@ func (l *Loader) Load(account *accounts.Account) Config {
 	activeSource := ""
 	var public *accounts.PublicAccount
 	if authorization == "" && account != nil {
-		authorization = accounts.Authorization(account)
+		if strings.TrimSpace(account.CodingPlanAPIKey) != "" {
+			authorization = strings.TrimSpace(account.CodingPlanAPIKey)
+			endpoint = l.cfg.ZAICodingPlanUpstreamURL
+			activeSource = "proxy-account-coding-plan:" + account.ID
+		} else {
+			authorization = accounts.Authorization(account)
+		}
 		item := accounts.Sanitize(*account)
 		public = &item
-		activeSource = "proxy-account:" + account.ID
+		if activeSource == "" {
+			activeSource = "proxy-account:" + account.ID
+		}
 	}
 	if authorization == "" {
 		authorization = header(headers, "Authorization")
@@ -106,10 +116,20 @@ func (l *Loader) Load(account *accounts.Account) Config {
 		}
 	}
 	accountID := ""
+	quotaEndpoint := ""
+	quotaAuthorization := ""
 	if account != nil {
 		accountID = account.ID
+		if strings.TrimSpace(account.CodingPlanAPIKey) != "" {
+			quotaEndpoint = l.cfg.ZAIUsageQuotaURL
+			quotaAuthorization = strings.TrimSpace(account.CodingPlanAPIKey)
+		}
 	}
-	return Config{Endpoint: endpoint, BaseHeaders: baseHeaders, BodyTemplate: template, Source: activeSource, AccountID: accountID, ActiveAccount: public, HasAuthorization: authorization != "", HasCaptcha: captcha != ""}
+	return Config{
+		Endpoint: endpoint, BaseHeaders: baseHeaders, BodyTemplate: template, Source: activeSource, AccountID: accountID,
+		QuotaEndpoint: quotaEndpoint, QuotaAuthorization: quotaAuthorization,
+		ActiveAccount: public, HasAuthorization: authorization != "", HasCaptcha: captcha != "",
+	}
 }
 
 func (l *Loader) cachedModelIO() (map[string]any, string) {

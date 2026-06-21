@@ -73,6 +73,10 @@ func (p *Pool) SelectForRequest(ctx context.Context, model models.Model, require
 	return p.selectWithRequirement(ctx, model, requiredUnits, skip)
 }
 
+func (p *Pool) SelectBestEffort(ctx context.Context, model models.Model, skip map[string]bool) Selection {
+	return p.selectWithRequirement(ctx, model, -1, skip)
+}
+
 func (p *Pool) selectWithRequirement(ctx context.Context, model models.Model, requiredUnits int64, skip map[string]bool) Selection {
 	fallback := p.loader.Load(nil)
 	if !p.cfg.AccountRotation || p.cfg.Authorization != "" {
@@ -162,6 +166,9 @@ func (p *Pool) bestEligible(items []inspectedAccount, requiredUnits int64) (insp
 }
 
 func (p *Pool) minimumRequired(requiredUnits int64) int64 {
+	if requiredUnits < 0 {
+		return 0
+	}
 	if requiredUnits > p.cfg.AccountMinAvailable {
 		return requiredUnits
 	}
