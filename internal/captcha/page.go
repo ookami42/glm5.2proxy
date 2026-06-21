@@ -77,10 +77,10 @@ const BrowserPage = `<!doctype html>
           showErrorTip: false, delayBeforeSuccess: false,
           element: "#captcha-element", button: "#captcha-button",
           getInstance(value) { instance = value; resolve(); },
-          success(token) { void finish({ token }); },
+          success(token) { void finish({ token, region: config.region }); },
           fail(result) {
             const token = result?.captchaVerifyParam || result?.CaptchaVerifyParam;
-            if (token) return void finish({ token });
+            if (token) return void finish({ token, region: config.region });
             if (result?.verifyResult === false && instance?.show) {
               if (headless) return void finish({ error: "Aliyun exigiu desafio interativo. Abra /zcode/captcha/browser?client=standalone-browser." });
               setStatus("Desafio interativo exigido. Resolva a verificacao exibida.");

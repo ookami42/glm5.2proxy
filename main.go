@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"io/fs"
 	"log"
+	"net/url"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -48,6 +52,19 @@ func (d *Desktop) Port() int {
 	return d.service.Port()
 }
 
+func (d *Desktop) OpenExternalURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errInvalidURL()
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return errInvalidURL()
+	}
+	return openExternalURL(rawURL)
+}
+
 func main() {
 	service, err := app.New()
 	if err != nil {
@@ -71,5 +88,20 @@ func main() {
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+func errInvalidURL() error {
+	return errors.New("URL de autenticacao invalida")
+}
+
+func openExternalURL(rawURL string) error {
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
+	case "darwin":
+		return exec.Command("open", rawURL).Start()
+	default:
+		return exec.Command("xdg-open", rawURL).Start()
 	}
 }

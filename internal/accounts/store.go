@@ -34,6 +34,7 @@ type Account struct {
 	User              User       `json:"user"`
 	ZCodeJWTToken     string     `json:"zcodeJwtToken"`
 	ZAIAcccessToken   string     `json:"zaiAccessToken,omitempty"`
+	CodingPlanAPIKey  string     `json:"codingPlanApiKey,omitempty"`
 	TokenExpiresAt    *time.Time `json:"tokenExpiresAt,omitempty"`
 	CreatedAt         time.Time  `json:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
@@ -54,18 +55,19 @@ type envelope struct {
 }
 
 type PublicAccount struct {
-	ID                string     `json:"id"`
-	RegistrationOrder int        `json:"registrationOrder"`
-	Label             string     `json:"label"`
-	User              PublicUser `json:"user"`
-	QueuePosition     int        `json:"queuePosition,omitempty"`
-	Active            bool       `json:"active"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
-	HasZCodeJWTToken  bool       `json:"hasZcodeJwtToken"`
-	HasZAIAccessToken bool       `json:"hasZaiAccessToken"`
-	TokenExpiresAt    *time.Time `json:"tokenExpiresAt"`
-	TokenExpired      *bool      `json:"tokenExpired"`
+	ID                  string     `json:"id"`
+	RegistrationOrder   int        `json:"registrationOrder"`
+	Label               string     `json:"label"`
+	User                PublicUser `json:"user"`
+	QueuePosition       int        `json:"queuePosition,omitempty"`
+	Active              bool       `json:"active"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
+	HasZCodeJWTToken    bool       `json:"hasZcodeJwtToken"`
+	HasZAIAccessToken   bool       `json:"hasZaiAccessToken"`
+	HasCodingPlanAPIKey bool       `json:"hasCodingPlanApiKey"`
+	TokenExpiresAt      *time.Time `json:"tokenExpiresAt"`
+	TokenExpired        *bool      `json:"tokenExpired"`
 }
 
 type PublicUser struct {
@@ -164,6 +166,9 @@ func (s *Store) Upsert(userData User, jwt, accessToken string) (PublicAccount, e
 		if account.ZAIAcccessToken == "" {
 			account.ZAIAcccessToken = existing.ZAIAcccessToken
 		}
+		if account.CodingPlanAPIKey == "" {
+			account.CodingPlanAPIKey = existing.CodingPlanAPIKey
+		}
 		s.data.Accounts[index] = account
 	} else {
 		s.data.Accounts = append(s.data.Accounts, account)
@@ -175,6 +180,24 @@ func (s *Store) Upsert(userData User, jwt, accessToken string) (PublicAccount, e
 		return PublicAccount{}, err
 	}
 	return Sanitize(account), nil
+}
+
+func (s *Store) UpdateCodingPlanAPIKey(id, apiKey string) (*Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.data.Accounts {
+		if s.data.Accounts[index].ID != id {
+			continue
+		}
+		s.data.Accounts[index].CodingPlanAPIKey = strings.TrimSpace(apiKey)
+		s.data.Accounts[index].UpdatedAt = time.Now().UTC()
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
+		account := s.data.Accounts[index]
+		return &account, nil
+	}
+	return nil, nil
 }
 
 func (s *Store) Activate(id string) (*PublicAccount, error) {
@@ -256,7 +279,8 @@ func Sanitize(account Account) PublicAccount {
 		ID: account.ID, RegistrationOrder: account.RegistrationOrder, Label: fmt.Sprintf("Conta %d", account.RegistrationOrder),
 		User:      PublicUser{ID: first(account.User.UserID, account.User.ID), Email: account.User.Email, Name: first(account.User.Name, account.User.Nickname), Avatar: first(account.User.Avatar, account.User.AvatarURL)},
 		CreatedAt: account.CreatedAt, UpdatedAt: account.UpdatedAt, HasZCodeJWTToken: account.ZCodeJWTToken != "",
-		HasZAIAccessToken: account.ZAIAcccessToken != "", TokenExpiresAt: account.TokenExpiresAt, TokenExpired: expired,
+		HasZAIAccessToken: account.ZAIAcccessToken != "", HasCodingPlanAPIKey: account.CodingPlanAPIKey != "",
+		TokenExpiresAt: account.TokenExpiresAt, TokenExpired: expired,
 	}
 }
 

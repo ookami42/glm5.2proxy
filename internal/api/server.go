@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"glm5.2proxy/internal/accountcreator"
 	"glm5.2proxy/internal/accountpool"
 	"glm5.2proxy/internal/accounts"
 	"glm5.2proxy/internal/auth"
 	"glm5.2proxy/internal/captcha"
+	"glm5.2proxy/internal/codingplan"
 	"glm5.2proxy/internal/config"
 	"glm5.2proxy/internal/models"
 	"glm5.2proxy/internal/openai"
@@ -27,23 +29,32 @@ import (
 )
 
 type Server struct {
-	cfg      config.Config
-	port     int
-	admin    *state.AdminStore
-	accounts *accounts.Store
-	oauth    *auth.Service
-	quota    *quota.Service
-	pool     *accountpool.Pool
-	loader   *upstream.Loader
-	captcha  *captcha.Bridge
-	browser  *captcha.BrowserManager
-	proxy    *proxy.Service
-	queue    *requestqueue.Queue
-	http     *http.Server
-	logs     *logBuffer
-	reserve  *usageReserve
-	zcode    *zcodeBridge
+	cfg           config.Config
+	port          int
+	admin         *state.AdminStore
+	accounts      *accounts.Store
+	oauth         *auth.Service
+	quota         *quota.Service
+	pool          *accountpool.Pool
+	loader        *upstream.Loader
+	captcha       *captcha.Bridge
+	browser       *captcha.BrowserManager
+	codingPlan    *codingplan.Service
+	proxy         *proxy.Service
+	queue         *requestqueue.Queue
+	creator       *accountcreator.Runner
+	http          *http.Server
+	logs          *logBuffer
+	zcode         *zcodeBridge
+	zcodeApplyMu  sync.Mutex
+	zcodeApplySeq int64
+	repairMu      sync.Mutex
 }
+
+const (
+	accountListQuotaCacheMaxAge = 30 * time.Second
+	accountListQuotaTimeout     = 8 * time.Second
+)
 
 func New(
 	cfg config.Config,
@@ -58,7 +69,7 @@ func New(
 	browser *captcha.BrowserManager,
 	proxyService *proxy.Service,
 ) *Server {
-	server := &Server{cfg: cfg, port: port, admin: admin, accounts: accountStore, oauth: oauth, quota: quotaService, pool: pool, loader: loader, captcha: bridge, browser: browser, proxy: proxyService, queue: requestqueue.New(), logs: newLogBuffer(500), reserve: newUsageReserve(cfg), zcode: newZCodeBridge()}
+	server := &Server{cfg: cfg, port: port, admin: admin, accounts: accountStore, oauth: oauth, quota: quotaService, pool: pool, loader: loader, captcha: bridge, browser: browser, codingPlan: codingplan.New(cfg), proxy: proxyService, queue: requestqueue.New(), creator: accountcreator.New(cfg), logs: newLogBuffer(500), zcode: newZCodeBridge()}
 	server.http = &http.Server{Addr: net.JoinHostPort(cfg.Host, strconv.Itoa(port)), Handler: server.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	return server
 }
@@ -132,12 +143,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/accounts/{id}/thinking", s.deleteAccountThinking)
 	mux.HandleFunc("GET /api/admin/models/capabilities", s.modelCapabilities)
 	mux.HandleFunc("GET /api/admin/accounts", s.listAccounts)
+	mux.HandleFunc("POST /api/admin/accounts/repair", s.repairAccounts)
 	mux.HandleFunc("GET /api/admin/accounts/{id}", s.getAccount)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/activate", s.activateAccountByPath)
+	mux.HandleFunc("POST /api/admin/accounts/{id}/coding-plan/refresh", s.refreshAccountCodingPlan)
 	mux.HandleFunc("GET /api/admin/zcode/environment", s.zcodeEnvironment)
 	mux.HandleFunc("POST /api/admin/zcode/accounts/{id}/activate", s.activateAccountInZCode)
 	mux.HandleFunc("GET /api/admin/zcode/bridge/status", s.zcodeBridgeStatus)
 	mux.HandleFunc("GET /api/admin/zcode/bridge/next", s.zcodeBridgeNext)
+	mux.HandleFunc("GET /api/admin/zcode/bridge/ack", s.zcodeBridgeAckQuery)
 	mux.HandleFunc("POST /api/admin/zcode/bridge/ack", s.zcodeBridgeAck)
 	mux.HandleFunc("PUT /api/admin/accounts/order", s.reorderAccounts)
 	mux.HandleFunc("DELETE /api/admin/accounts/{id}", s.deleteAccountByPath)
@@ -146,6 +160,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/admin/auth/login/callback", s.loginCallback)
 	mux.HandleFunc("GET /api/admin/logs", s.systemLogs)
 	mux.HandleFunc("GET /api/admin/queue", s.queueSnapshot)
+	mux.HandleFunc("POST /api/admin/account-creator/run", s.runAccountCreator)
 	return s.cors(mux)
 }
 
@@ -171,6 +186,29 @@ func (s *Server) modelCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "zcode.model_capabilities", "data": models.List()})
 }
 
+func (s *Server) SelectStartupAccount(ctx context.Context) {
+	model, ok := models.Resolve("glm-5.2")
+	if !ok {
+		return
+	}
+	previous := s.accounts.Active()
+	selection := s.pool.SelectSkipping(ctx, model, nil)
+	if selection.Account == nil || selection.AllExhausted || !selection.Config.HasAuthorization {
+		s.logs.add("warn", "account.startup_selection_skipped", "Proxy iniciado sem selecionar conta automaticamente: nenhuma conta elegivel para "+model.ID)
+		return
+	}
+	label := accounts.Sanitize(*selection.Account).Label
+	if selection.Rotated {
+		from := "nenhuma conta anterior"
+		if previous != nil {
+			from = accounts.Sanitize(*previous).Label
+		}
+		s.logs.add("info", "account.startup_selected", fmt.Sprintf("Proxy iniciado com %s para %s: %s; conta anterior era %s", label, model.ID, selection.Reason, from))
+		return
+	}
+	s.logs.add("info", "account.startup_selected", fmt.Sprintf("Proxy iniciado mantendo %s para %s: %s", label, model.ID, selection.Reason))
+}
+
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	if err := decodeJSON(w, r, &body); err != nil {
@@ -183,17 +221,58 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID := randomID()
-	skipped := map[string]bool{}
+	skipped := map[string]accountSkip{}
 	authSkipped := false
+	totalAttempts := 0
+	var lastErr error
+	var staleNotice *accountSwitchNotice
+	accountCreationAttempted := false
+	bestEffortExistingAccounts := false
+	baseRequirement := openai.EstimateTokenRequirement(body, openai.ToAnthropic(body, nil, model, s.admin.ThinkingFor(""), s.cfg.DefaultMaxTokens))
 	for {
 		previousActive := s.accounts.Active()
-		selection := s.pool.SelectSkipping(r.Context(), model, skipped)
+		selection := s.pool.SelectForRequest(r.Context(), model, baseRequirement.Total, skipMask(skipped))
+		if bestEffortExistingAccounts {
+			selection = s.pool.SelectBestEffort(r.Context(), model, skipMask(skipped))
+		}
 		if selection.AllExhausted {
+			if s.releaseExpiredAccountSkips(requestID, skipped) {
+				staleNotice = nil
+				continue
+			}
+			if !accountCreationAttempted {
+				accountCreationAttempted = true
+				if s.tryCreateAccountForRequest(r.Context(), requestID, model, baseRequirement, selection.Available) {
+					skipped = map[string]accountSkip{}
+					staleNotice = nil
+					continue
+				}
+			}
+			if !bestEffortExistingAccounts {
+				bestEffortExistingAccounts = true
+				skipped = map[string]accountSkip{}
+				staleNotice = nil
+				s.logs.add("warn", "account_creator.fallback_existing_accounts", fmt.Sprintf("Request %s nao conseguiu acionar a criacao automatica ou ela nao resolveria; tentando novamente as contas salvas em modo best-effort antes de encerrar", requestID))
+				continue
+			}
+			if s.allAccountsSkipped(skipped) && s.hasRetryableAccountSkip(skipped) {
+				if !s.waitForAccountRetryCooldown(r.Context(), requestID, skipped) {
+					writeError(w, http.StatusRequestTimeout, "request cancelled while waiting for account retry cooldown", "zcode_account_retry_wait_cancelled")
+					return
+				}
+				staleNotice = nil
+				continue
+			}
+			if staleNotice != nil && lastErr != nil {
+				s.logs.add("error", "chat.failed", fmt.Sprintf("Request %s falhou apos %d tentativa(s) distribuidas: todas as contas testadas encerraram o stream sem resposta util", requestID, totalAttempts))
+				writeProxyErrorWithDiagnostic(w, lastErr, totalAttempts, nil)
+				return
+			}
 			if authSkipped {
 				writeError(w, http.StatusUnauthorized, "Todas as contas salvas parecem estar com login expirado. Abra o app, faca login novamente em uma conta Z.ai e tente de novo.", "zcode_all_accounts_auth_failed")
 				return
 			}
-			writeError(w, http.StatusTooManyRequests, "all saved ZCode accounts have exhausted quota for "+model.ID, "zcode_all_accounts_exhausted")
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("nenhuma conta ZCode tem cota suficiente para %s: request precisa de aproximadamente %d tokens", model.ID, baseRequirement.Total), "zcode_all_accounts_exhausted")
 			return
 		}
 		if !selection.Config.HasAuthorization {
@@ -204,35 +283,36 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		if selection.Account != nil {
 			accountID = selection.Account.ID
 		}
-		requiredUnits := s.reserve.Minimum(model.ID, s.cfg.AccountMinAvailable)
-		if accountID != "" && selection.Balance != nil && selection.Balance.Available != nil && *selection.Balance.Available < requiredUnits {
-			skipped[accountID] = true
+		if staleNotice != nil && accountID != "" {
+			s.logs.add("warn", "account.stale_rotated", fmt.Sprintf("Request %s atingiu %d tentativa(s) sem resposta util na conta %s; mudando para %s e tentando novamente", requestID, staleNotice.Attempts, staleNotice.FromLabel, accounts.Sanitize(*selection.Account).Label))
+			staleNotice = nil
+		}
+		s.logAutoRotation(requestID, previousActive, selection.Account, model)
+		thinking := s.admin.ThinkingFor(accountID)
+		upstreamBody := openai.ToAnthropic(body, selection.Config.BodyTemplate, model, thinking, s.cfg.DefaultMaxTokens)
+		requirement := openai.EstimateTokenRequirement(body, upstreamBody)
+		if !bestEffortExistingAccounts && accountID != "" && selection.Balance != nil && selection.Balance.Available != nil && *selection.Balance.Available < requirement.Total {
+			s.blockAccount(skipped, accountID, accounts.Sanitize(*selection.Account).Label, "cota insuficiente para request", false)
 			s.logs.add(
 				"warn",
-				"account.reserve_insufficient",
+				"account.request_quota_insufficient",
 				fmt.Sprintf(
-					"Request %s pulou a conta %s antes do chat: disponivel=%d, minimo dinamico=%d para %s",
+					"Request %s pulou a conta %s antes do chat: disponivel=%d, necessario=%d, max=%d, input_estimado=%d, origem=%s",
 					requestID,
 					accountID,
 					*selection.Balance.Available,
-					requiredUnits,
-					model.ID,
+					requirement.Total,
+					requirement.UpstreamMax,
+					requirement.EstimatedInput,
+					requirement.Source,
 				),
 			)
-			fallback := s.pool.SelectSkipping(r.Context(), model, skipped)
-			if !fallback.AllExhausted && fallback.Account != nil {
-				selection = fallback
-				accountID = fallback.Account.ID
-			} else {
-				delete(skipped, accountID)
-			}
+			continue
 		}
-		s.logAndSyncAutoRotation(requestID, previousActive, selection.Account, model)
 		queueKey := requestqueue.Key(accountID, model.ID)
-		thinking := s.admin.ThinkingFor(accountID)
-		upstreamBody := openai.ToAnthropic(body, selection.Config.BodyTemplate, model, thinking, s.cfg.DefaultMaxTokens)
-		s.logs.add("info", "chat.started", fmt.Sprintf("Request %s iniciado com %s usando conta %s", requestID, model.ID, accountID))
-		before, _ := s.quota.ModelBalance(r.Context(), selection.Config, model)
+		perAccountAttempts := s.perAccountAttemptLimit()
+		s.logs.add("info", "chat.started", fmt.Sprintf("Request %s iniciado com %s usando conta %s; request precisa de aproximadamente %d tokens; limite de %d tentativa(s) antes de rotacionar", requestID, model.ID, accountID, requirement.Total, perAccountAttempts))
+		before, _ := s.quota.ModelBalanceCached(r.Context(), selection.Config, model, 15*time.Second)
 		lease, err := s.queue.Acquire(r.Context(), queueKey)
 		if err != nil {
 			s.logs.add("warn", "chat.cancelled", fmt.Sprintf("Request %s cancelado enquanto aguardava fila %s: %v", requestID, queueKey, err))
@@ -241,9 +321,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		if lease.Position() > 0 {
 			s.logs.add("info", "queue.released", fmt.Sprintf("Request %s liberado apos aguardar fila %s", requestID, queueKey))
-			lease.Release()
-			continue
 		}
+		s.pool.MarkRequest(accountID)
 		onSuccess := func() {
 			s.logs.add("info", "chat.completed", fmt.Sprintf("Request %s concluido com %s", requestID, model.ID))
 			if s.cfg.QuotaLog {
@@ -251,8 +330,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if streaming(body) {
-			attempts, err, started := s.streamChat(w, r, selection.Config, upstreamBody, model, onSuccess)
+			attempts, err, started := s.streamChat(w, r, selection.Config, upstreamBody, model, perAccountAttempts, onSuccess)
 			lease.Release()
+			totalAttempts += attempts
 			if err == nil {
 				return
 			}
@@ -263,12 +343,17 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 				authSkipped = true
 				continue
 			}
-			diagnostic := s.logChatFailure(requestID, attempts, err, body, upstreamBody)
-			writeProxyErrorWithDiagnostic(w, err, attempts, diagnostic)
+			if !started && s.skipStaleConnectionAccount(accountID, selection.Account, attempts, err, skipped, &staleNotice) {
+				lastErr = err
+				continue
+			}
+			diagnostic := s.logChatFailure(requestID, totalAttempts, err, body, upstreamBody)
+			writeProxyErrorWithDiagnostic(w, err, totalAttempts, diagnostic)
 			return
 		}
-		completion, attempts, err := s.proxy.Collect(r.Context(), selection.Config, upstreamBody)
+		completion, attempts, err := s.proxy.CollectWithAttemptLimit(r.Context(), selection.Config, upstreamBody, perAccountAttempts)
 		lease.Release()
+		totalAttempts += attempts
 		if err != nil {
 			if s.skipQuotaExhaustedAccount(requestID, accountID, model, err, skipped) {
 				continue
@@ -277,8 +362,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 				authSkipped = true
 				continue
 			}
-			diagnostic := s.logChatFailure(requestID, attempts, err, body, upstreamBody)
-			writeProxyErrorWithDiagnostic(w, err, attempts, diagnostic)
+			if s.skipStaleConnectionAccount(accountID, selection.Account, attempts, err, skipped, &staleNotice) {
+				lastErr = err
+				continue
+			}
+			diagnostic := s.logChatFailure(requestID, totalAttempts, err, body, upstreamBody)
+			writeProxyErrorWithDiagnostic(w, err, totalAttempts, diagnostic)
 			return
 		}
 		message := map[string]any{"role": "assistant", "content": completion.Text}
@@ -291,7 +380,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upstreamConfig upstream.Config, body map[string]any, model models.Model, onSuccess func()) (int, error, bool) {
+func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upstreamConfig upstream.Config, body map[string]any, model models.Model, maxAttempts int, onSuccess func()) (int, error, bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported", "internal_error")
@@ -310,7 +399,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upstreamConf
 	}
 	id := "chatcmpl-" + randomID()
 	finalSent := false
-	attempts, err := s.proxy.Stream(r.Context(), upstreamConfig, body, func(event proxy.StreamEvent) error {
+	attempts, err := s.proxy.StreamWithAttemptLimit(r.Context(), upstreamConfig, body, maxAttempts, func(event proxy.StreamEvent) error {
 		start()
 		if event.FinishReason != "" {
 			if finalSent {
@@ -342,7 +431,20 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upstreamConf
 	return attempts, nil, true
 }
 
-func (s *Server) logAndSyncAutoRotation(requestID string, previousActive *accounts.Account, selected *accounts.Account, model models.Model) {
+type accountSwitchNotice struct {
+	FromLabel string
+	Attempts  int
+}
+
+type accountSkip struct {
+	Label      string
+	Reason     string
+	BlockedAt  time.Time
+	RetryAfter time.Time
+	Retryable  bool
+}
+
+func (s *Server) logAutoRotation(requestID string, previousActive *accounts.Account, selected *accounts.Account, model models.Model) {
 	if selected == nil {
 		return
 	}
@@ -359,34 +461,150 @@ func (s *Server) logAndSyncAutoRotation(requestID string, previousActive *accoun
 		"account.rotated",
 		fmt.Sprintf("Request %s trocou automaticamente a conta de %s para %s ao selecionar %s", requestID, fromLabel, toLabel, model.ID),
 	)
-	go func(accountID, accountLabel string) {
-		result, err := s.applyAccountInZCode(accountID)
-		if err != nil {
-			s.logs.add("warn", "zcode.auto_apply_failed", "Rotacao automatica selecionou "+accountLabel+", mas nao foi possivel aplicar no ZCode: "+err.Error())
-			return
-		}
-		if result != nil {
-			s.logs.add("info", "zcode.auto_applied", "Rotacao automatica aplicou "+accountLabel+" no ambiente interno do ZCode")
-		}
-	}(selected.ID, toLabel)
 }
 
-func (s *Server) skipQuotaExhaustedAccount(requestID, accountID string, model models.Model, err error, skipped map[string]bool) bool {
-	if accountID == "" || skipped[accountID] || !proxy.IsQuotaExhausted(err) {
+func (s *Server) skipStaleConnectionAccount(accountID string, account *accounts.Account, attempts int, err error, skipped map[string]accountSkip, notice **accountSwitchNotice) bool {
+	if accountID == "" || !proxy.IsStaleConnection(err) {
 		return false
 	}
-	skipped[accountID] = true
+	label := accountID
+	if account != nil {
+		label = accounts.Sanitize(*account).Label
+	}
+	s.blockAccount(skipped, accountID, label, "stream vazio", true)
+	*notice = &accountSwitchNotice{FromLabel: label, Attempts: attempts}
+	return true
+}
+
+func (s *Server) perAccountAttemptLimit() int {
+	if s.cfg.RetryMaxAttempts > 0 && s.cfg.RetryMaxAttempts < 4 {
+		return s.cfg.RetryMaxAttempts
+	}
+	return 4
+}
+
+func (s *Server) skipQuotaExhaustedAccount(requestID, accountID string, model models.Model, err error, skipped map[string]accountSkip) bool {
+	if accountID == "" || !proxy.IsQuotaExhausted(err) {
+		return false
+	}
+	s.blockAccount(skipped, accountID, accountID, "cota esgotada", false)
 	s.logs.add("warn", "account.quota_exhausted", fmt.Sprintf("Request %s detectou cota esgotada para %s na conta %s; tentando proxima conta", requestID, model.ID, accountID))
 	return true
 }
 
-func (s *Server) skipAuthFailedAccount(requestID, accountID string, err error, skipped map[string]bool) bool {
-	if accountID == "" || skipped[accountID] || !proxy.IsAuthFailed(err) {
+func (s *Server) skipAuthFailedAccount(requestID, accountID string, err error, skipped map[string]accountSkip) bool {
+	if accountID == "" || !proxy.IsAuthFailed(err) {
 		return false
 	}
-	skipped[accountID] = true
+	s.blockAccount(skipped, accountID, accountID, "auth invalida", false)
 	s.logs.add("warn", "account.auth_failed", fmt.Sprintf("Request %s recebeu erro de login na conta %s; tentando proxima conta salva", requestID, accountID))
 	return true
+}
+
+func (s *Server) blockAccount(skipped map[string]accountSkip, accountID, label, reason string, retryable bool) {
+	if accountID == "" {
+		return
+	}
+	if _, exists := skipped[accountID]; exists {
+		return
+	}
+	now := time.Now()
+	skipped[accountID] = accountSkip{Label: label, Reason: reason, BlockedAt: now, RetryAfter: now.Add(s.accountRetryCooldown()), Retryable: retryable}
+}
+
+func skipMask(skipped map[string]accountSkip) map[string]bool {
+	if len(skipped) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(skipped))
+	for accountID := range skipped {
+		out[accountID] = true
+	}
+	return out
+}
+
+func (s *Server) accountRetryCooldown() time.Duration {
+	if s.cfg.AccountRetryCooldown <= 0 {
+		return 5 * time.Minute
+	}
+	return s.cfg.AccountRetryCooldown
+}
+
+func (s *Server) releaseExpiredAccountSkips(requestID string, skipped map[string]accountSkip) bool {
+	if !s.allAccountsSkipped(skipped) {
+		return false
+	}
+	now := time.Now()
+	released := []string{}
+	for accountID, item := range skipped {
+		if item.Retryable && !now.Before(item.RetryAfter) {
+			delete(skipped, accountID)
+			released = append(released, item.Label)
+		}
+	}
+	if len(released) == 0 {
+		return false
+	}
+	s.logs.add("info", "account.retry_cooldown_released", fmt.Sprintf("Request %s liberou novamente %s apos cooldown de %s; todas as contas ja tinham sido testadas", requestID, strings.Join(released, ", "), s.accountRetryCooldown()))
+	return true
+}
+
+func (s *Server) waitForAccountRetryCooldown(ctx context.Context, requestID string, skipped map[string]accountSkip) bool {
+	next, ok := nextRetryAfter(skipped)
+	if !ok {
+		return false
+	}
+	wait := time.Until(next)
+	if wait < 0 {
+		wait = 0
+	}
+	s.logs.add("warn", "account.retry_cooldown_wait", fmt.Sprintf("Request %s testou todas as contas disponiveis; aguardando %s para tentar novamente contas bloqueadas em memoria", requestID, wait.Round(time.Second)))
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return s.releaseExpiredAccountSkips(requestID, skipped)
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *Server) allAccountsSkipped(skipped map[string]accountSkip) bool {
+	if len(skipped) == 0 {
+		return false
+	}
+	accounts := s.accounts.Accounts()
+	if len(accounts) == 0 {
+		return false
+	}
+	for _, account := range accounts {
+		if _, ok := skipped[account.ID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) hasRetryableAccountSkip(skipped map[string]accountSkip) bool {
+	for _, item := range skipped {
+		if item.Retryable {
+			return true
+		}
+	}
+	return false
+}
+
+func nextRetryAfter(skipped map[string]accountSkip) (time.Time, bool) {
+	var next time.Time
+	for _, item := range skipped {
+		if !item.Retryable {
+			continue
+		}
+		if next.IsZero() || item.RetryAfter.Before(next) {
+			next = item.RetryAfter
+		}
+	}
+	return next, !next.IsZero()
 }
 
 func (s *Server) logChatFailure(requestID string, attempts int, err error, clientBody, upstreamBody map[string]any) map[string]any {
@@ -521,37 +739,62 @@ func truncateString(value string, limit int) string {
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	activeID, publicAccounts := s.accounts.Public()
+	includeQuota := accountListIncludesQuota(r)
+	if !includeQuota {
+		data := make([]map[string]any, 0, len(publicAccounts))
+		for _, public := range publicAccounts {
+			value := mapFrom(public)
+			value["credentialSource"] = "zcode-oauth-cli"
+			value["quota"] = nil
+			value["quotaError"] = nil
+			value["quotaSkipped"] = true
+			data = append(data, value)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "activeAccountId": activeID, "refreshSupported": false, "loginRequiredOnExpiry": true, "data": data})
+		return
+	}
+
 	type result struct {
 		index int
 		value map[string]any
 	}
-	channel := make(chan result, len(publicAccounts))
-	var wait sync.WaitGroup
-	for index, public := range publicAccounts {
-		wait.Add(1)
-		go func(index int, public accounts.PublicAccount) {
-			defer wait.Done()
-			account := s.accounts.Get(public.ID)
-			value := mapFrom(public)
-			value["credentialSource"] = "zcode-oauth-cli"
-			snapshot, err := s.quota.Snapshot(r.Context(), s.loader.Load(account))
-			if err != nil {
-				value["quota"] = nil
-				value["quotaError"] = map[string]any{"message": err.Error(), "type": "zcode_quota_fetch_failed"}
-			} else {
-				value["quota"] = snapshot
-				value["quotaError"] = nil
-			}
-			channel <- result{index: index, value: value}
-		}(index, public)
-	}
-	wait.Wait()
-	close(channel)
 	data := make([]map[string]any, len(publicAccounts))
-	for item := range channel {
-		data[item.index] = item.value
+	for index, public := range publicAccounts {
+		account := s.accounts.Get(public.ID)
+		value := mapFrom(public)
+		value["credentialSource"] = "zcode-oauth-cli"
+		if account == nil {
+			value["quota"] = nil
+			value["quotaError"] = map[string]any{"message": "account not found", "type": "not_found"}
+			data[index] = value
+			continue
+		}
+		quotaCtx, cancel := context.WithTimeout(r.Context(), accountListQuotaTimeout)
+		snapshot, err := s.quota.BalanceSnapshot(quotaCtx, s.loader.Load(account))
+		cancel()
+		if err != nil {
+			value["quota"] = nil
+			value["quotaError"] = map[string]any{"message": err.Error(), "type": "zcode_quota_fetch_failed"}
+		} else {
+			value["quota"] = snapshot
+			value["quotaError"] = nil
+		}
+		data[index] = value
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "activeAccountId": activeID, "refreshSupported": false, "loginRequiredOnExpiry": true, "data": data})
+}
+
+func accountListIncludesQuota(r *http.Request) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("quota")))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include_quota")))
+	}
+	switch value {
+	case "0", "false", "no", "off", "skip", "none":
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
@@ -573,7 +816,9 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	value := mapFrom(public)
 	value["object"] = "zcode.account"
 	value["credentialSource"] = "zcode-oauth-cli"
-	snapshot, err := s.quota.Snapshot(r.Context(), s.loader.Load(account))
+	quotaCtx, cancel := context.WithTimeout(r.Context(), accountListQuotaTimeout)
+	defer cancel()
+	snapshot, err := s.quota.BalanceSnapshot(quotaCtx, s.loader.Load(account))
 	if err != nil {
 		value["quota"] = nil
 		value["quotaError"] = map[string]any{"message": err.Error(), "type": "zcode_quota_fetch_failed"}
@@ -612,12 +857,15 @@ func (s *Server) authAccounts(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	flow, err := s.oauth.Start(r.Context())
+	elapsed := time.Since(started)
 	if err != nil {
+		s.logs.add("warn", "auth.start_failed", fmt.Sprintf("Login ZCode falhou apos %s ao iniciar o fluxo OAuth: %s", elapsed, err))
 		writeError(w, http.StatusBadGateway, err.Error(), "zcode_auth_flow_failed")
 		return
 	}
-	s.logs.add("info", "auth.started", "Novo login ZCode iniciado")
+	s.logs.add("info", "auth.started", fmt.Sprintf("Novo login ZCode iniciado em %s (flow %s)", elapsed, flow.FlowID))
 	writeJSON(w, http.StatusCreated, flow)
 }
 
@@ -627,13 +875,18 @@ func (s *Server) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "flow_id is required", "invalid_request_error")
 		return
 	}
+	started := time.Now()
 	result, err := s.oauth.Poll(r.Context(), flowID)
+	elapsed := time.Since(started)
 	if err != nil {
+		s.logs.add("warn", "auth.poll_failed", fmt.Sprintf("Poll do flow %s falhou apos %s: %s", flowID, elapsed, err))
 		writeError(w, http.StatusBadGateway, err.Error(), "zcode_auth_flow_failed")
 		return
 	}
 	if result["status"] == "ready" {
-		s.logs.add("info", "auth.completed", "Conta ZCode autenticada e adicionada à fila")
+		s.logs.add("info", "auth.completed", fmt.Sprintf("Conta ZCode autenticada e adicionada à fila (flow %s concluido apos %s)", flowID, elapsed))
+	} else if elapsed > time.Second {
+		s.logs.add("warn", "auth.poll_slow", fmt.Sprintf("Poll do flow %s levou %s para retornar status=%v", flowID, elapsed, result["status"]))
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -686,15 +939,36 @@ func (s *Server) activate(w http.ResponseWriter, id string) {
 		return
 	}
 	s.logs.add("info", "account.activated", "Conta ativa alterada para "+account.Label)
-	zcodeResult, zcodeErr := s.applyAccountInZCode(account.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"activeAccount": account,
-		"zcode": map[string]any{
-			"synced": zcodeErr == nil && zcodeResult != nil,
-			"error":  nullableError(zcodeErr),
-			"result": zcodeResult,
-		},
 	})
+}
+
+func (s *Server) refreshAccountCodingPlan(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	account := s.accounts.Get(id)
+	if account == nil {
+		writeError(w, http.StatusNotFound, "account not found", "not_found")
+		return
+	}
+	started := time.Now()
+	s.logs.add("info", "coding_plan.refresh_started", "Atualizando Coding Plan direto pelo proxy para "+accounts.Sanitize(*account).Label)
+	outcome, err := s.refreshCodingPlanForAccount(r.Context(), *account)
+	elapsed := time.Since(started)
+	if err != nil {
+		s.logs.add("warn", "coding_plan.refresh_failed", fmt.Sprintf("Falha ao atualizar Coding Plan direto pelo proxy para %s apos %s: %s", accounts.Sanitize(*account).Label, elapsed, err))
+		writeError(w, http.StatusBadGateway, err.Error(), "zai_coding_plan_refresh_failed")
+		return
+	}
+	result := outcome.Result
+	if result.QuotaError != "" {
+		s.logs.add("warn", "coding_plan.quota_not_entitled", fmt.Sprintf("Coding Plan API key resolvida para %s, mas quota nao foi confirmada: %s", accounts.Sanitize(*account).Label, result.QuotaError))
+	}
+	if result.StartPlanError != "" {
+		s.logs.add("warn", "start_plan.refresh_failed", fmt.Sprintf("Start Plan nao confirmou cota para %s apos refresh direto: %s", accounts.Sanitize(*account).Label, result.StartPlanError))
+	}
+	s.logs.add("info", "coding_plan.refresh_completed", fmt.Sprintf("Coding Plan atualizado direto pelo proxy para %s em %s; organization=%s project=%s api_key=%s created=%t secret_resolved=%t quota_verified=%t start_plan_verified=%t credential_stored=%t", accounts.Sanitize(*account).Label, elapsed, result.OrganizationID, result.ProjectID, result.APIKeyName, result.APIKeyCreated, result.SecretResolved, result.QuotaVerified, result.StartPlanVerified, outcome.CredentialStored))
+	writeJSON(w, http.StatusOK, map[string]any{"object": "zai.coding_plan_refresh", "account": accounts.Sanitize(*account), "data": result})
 }
 
 func (s *Server) reorderAccounts(w http.ResponseWriter, r *http.Request) {
@@ -734,7 +1008,13 @@ func (s *Server) removeAccount(w http.ResponseWriter, id string) {
 	}
 	s.logs.add("warn", "account.removed", "Conta removida do pool")
 	_ = s.admin.SetAccountThinking(id, nil)
-	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "accountId": id})
+
+	nextActive := s.accounts.Active()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"removed":       true,
+		"accountId":     id,
+		"activeAccount": sanitizePointer(nextActive),
+	})
 }
 
 func (s *Server) captchaConfig(w http.ResponseWriter, r *http.Request) {
@@ -891,6 +1171,68 @@ func (s *Server) queueSnapshot(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "zcode.request_queue", "data": s.queue.Snapshot()})
 }
 
+func (s *Server) runAccountCreator(w http.ResponseWriter, r *http.Request) {
+	result, err := s.creator.Run(r.Context(), s.publicBaseURL())
+	if err != nil {
+		s.logs.add("error", "account_creator.failed", fmt.Sprintf("Criacao automatica de conta falhou: %v", err))
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": err.Error(), "type": "zcode_account_creator_failed"}, "result": result})
+		return
+	}
+	s.logs.add("info", "account_creator.completed", accountCreatorSuccessMessage("Criacao automatica de conta concluida pelo endpoint administrativo", result))
+	writeJSON(w, http.StatusOK, map[string]any{"object": "zcode.account_creator.run", "result": result})
+}
+
+func (s *Server) tryCreateAccountForRequest(ctx context.Context, requestID string, model models.Model, requirement openai.TokenRequirement, bestAvailable *int64) bool {
+	if requirement.Total > int64(model.DailyTokenAllowance) {
+		s.logs.add("warn", "account_creator.skipped_request_too_large", fmt.Sprintf("Request %s precisa de %d tokens para %s, acima da cota diaria de uma nova conta (%d); automacao de conta nao resolveria", requestID, requirement.Total, model.ID, model.DailyTokenAllowance))
+		return false
+	}
+	if s.creator == nil || !s.creator.Enabled() {
+		s.logs.add("warn", "account_creator.unavailable", fmt.Sprintf("Request %s precisa de %d tokens para %s, mas a criacao automatica de contas esta desativada", requestID, requirement.Total, model.ID))
+		return false
+	}
+	available := "unknown"
+	if bestAvailable != nil {
+		available = strconv.FormatInt(*bestAvailable, 10)
+	}
+	s.logs.add("warn", "account_creator.started", fmt.Sprintf("Request %s precisa de %d tokens para %s; maior cota disponivel=%s; iniciando automacao de criacao/vinculo de conta", requestID, requirement.Total, model.ID, available))
+	result, err := s.creator.Run(ctx, s.publicBaseURL())
+	if err != nil {
+		s.logs.add("error", "account_creator.failed", fmt.Sprintf("Request %s nao conseguiu criar nova conta automaticamente: %v", requestID, err))
+		return false
+	}
+	s.logs.add("info", "account_creator.completed", accountCreatorSuccessMessage(fmt.Sprintf("Request %s concluiu automacao de conta em %s; tentando selecionar conta novamente", requestID, result.Duration), result))
+	return true
+}
+
+func accountCreatorSuccessMessage(prefix string, result accountcreator.Result) string {
+	details := []string{}
+	if result.Label != "" {
+		details = append(details, "label="+result.Label)
+	}
+	if result.Email != "" {
+		details = append(details, "email="+result.Email)
+	}
+	if result.Username != "" {
+		details = append(details, "username="+result.Username)
+	}
+	if result.AccountID != "" {
+		details = append(details, "account_id="+result.AccountID)
+	}
+	if len(details) == 0 {
+		return prefix
+	}
+	return prefix + " (" + strings.Join(details, ", ") + ")"
+}
+
+func (s *Server) publicBaseURL() string {
+	host := s.cfg.Host
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(s.port))
+}
+
 func (s *Server) logQuota(requestID string, upstreamConfig upstream.Config, model models.Model, before *quota.Balance) {
 	var after *quota.Balance
 	for attempt := 0; attempt < s.cfg.QuotaRefreshAttempts; attempt++ {
@@ -902,9 +1244,6 @@ func (s *Server) logQuota(requestID string, upstreamConfig upstream.Config, mode
 		if changed(before, after) {
 			break
 		}
-	}
-	if usedDelta, ok := deltaInt(before, after); ok {
-		s.reserve.Observe(model.ID, usedDelta)
 	}
 	log.Printf("[quota] request=%s model=%s antiga used=%s remaining=%s available=%s -> atualizada used=%s remaining=%s available=%s deltaUsed=%s", requestID, model.UpstreamID, pointer(before, func(v *quota.Balance) *int64 { return v.Used }), pointer(before, func(v *quota.Balance) *int64 { return v.Remaining }), pointer(before, func(v *quota.Balance) *int64 { return v.Available }), pointer(after, func(v *quota.Balance) *int64 { return v.Used }), pointer(after, func(v *quota.Balance) *int64 { return v.Remaining }), pointer(after, func(v *quota.Balance) *int64 { return v.Available }), delta(before, after))
 	s.logs.add("info", "quota.updated", fmt.Sprintf(
@@ -1025,7 +1364,7 @@ func writeSSE(w http.ResponseWriter, value any) {
 
 func streaming(body map[string]any) bool {
 	value, ok := body["stream"].(bool)
-	return !ok || value
+	return ok && value
 }
 
 func nullable(value string) any {
@@ -1094,17 +1433,6 @@ func delta(before, after *quota.Balance) string {
 		return "unknown"
 	}
 	return strconv.FormatInt(*after.Used-*before.Used, 10)
-}
-
-func deltaInt(before, after *quota.Balance) (int64, bool) {
-	if before == nil || after == nil || before.Used == nil || after.Used == nil {
-		return 0, false
-	}
-	value := *after.Used - *before.Used
-	if value <= 0 {
-		return 0, false
-	}
-	return value, true
 }
 
 func (s *Server) Port() int { return s.port }

@@ -28,6 +28,8 @@ export interface Account {
   }
   quota: QuotaSnapshot | null
   quotaError: { message: string; type: string } | null
+  quotaSkipped?: boolean
+  quotaLoading?: boolean
   hasZcodeJwtToken: boolean
   hasZaiAccessToken: boolean
   tokenExpiresAt: string | null
@@ -89,11 +91,12 @@ export interface ZCodeApplyResult {
 
 export interface AccountActivateResponse {
   activeAccount: Account
-  zcode?: {
-    synced: boolean
-    error: string | null
-    result: ZCodeApplyResult | null
-  }
+}
+
+export interface AccountDeleteResponse {
+  removed: boolean
+  accountId: string
+  activeAccount: Account | null
 }
 
 export interface APIKey {

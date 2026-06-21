@@ -57,6 +57,47 @@ func TestTranslationKeepsThinkingParametersValidForClientTokenLimit(t *testing.T
 	}
 }
 
+func TestTokenRequirementUsesClientRequestedBudgetPlusEstimatedInput(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	body := map[string]any{
+		"model":      "glm-5.2",
+		"max_tokens": float64(500000),
+		"messages": []any{
+			map[string]any{"role": "system", "content": "system"},
+			map[string]any{"role": "user", "content": "hello world"},
+		},
+	}
+
+	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"}, 640000)
+	requirement := openai.EstimateTokenRequirement(body, translated)
+	if requirement.RequestedOutput != 500000 || requirement.ThinkingBudget != 32000 || requirement.UpstreamMax != 532000 {
+		t.Fatalf("unexpected explicit output budget: %+v translated=%+v", requirement, translated)
+	}
+	if requirement.EstimatedInput <= 0 {
+		t.Fatalf("input tokens should be estimated from request messages: %+v", requirement)
+	}
+	if requirement.Total != requirement.RequestedOutput+requirement.ThinkingBudget+requirement.EstimatedInput {
+		t.Fatalf("total requirement must combine output, thinking, and input: %+v", requirement)
+	}
+}
+
+func TestTokenRequirementFallsBackToTranslatedMaxTokens(t *testing.T) {
+	model, _ := models.Resolve("glm-5.2")
+	body := map[string]any{
+		"model":    "glm-5.2",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+
+	translated := openai.ToAnthropic(body, nil, model, state.ThinkingSettings{Enabled: true, BudgetTokens: 32000, Effort: "max"}, 64000)
+	requirement := openai.EstimateTokenRequirement(body, translated)
+	if requirement.RequestedOutput != 0 || requirement.UpstreamMax != 64000 || requirement.Source != "translated_max_tokens" {
+		t.Fatalf("unexpected fallback token requirement: %+v translated=%+v", requirement, translated)
+	}
+	if requirement.Total < requirement.UpstreamMax {
+		t.Fatalf("total requirement must at least reserve translated max tokens: %+v", requirement)
+	}
+}
+
 func TestTranslationAddsThinkingBudgetToSmallClientOutputLimit(t *testing.T) {
 	model, _ := models.Resolve("glm-5.2")
 	body := map[string]any{

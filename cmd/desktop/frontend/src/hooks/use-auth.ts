@@ -26,8 +26,18 @@ export function useAuth() {
     setPending(true)
     setError(null)
     try {
+      const t0 = performance.now()
       const flow = await api.post<LoginFlow>('/api/admin/auth/login/start')
-      openExternalURL(flow.authorizeUrl)
+      const t1 = performance.now()
+      console.info(`[auth] login/start: ${(t1 - t0).toFixed(0)}ms (flow ${flow.flowId})`)
+      const openT0 = performance.now()
+      void openExternalURL(flow.authorizeUrl).then(() => {
+        console.info(`[auth] openExternalURL: ${(performance.now() - openT0).toFixed(0)}ms`)
+      }).catch((err) => {
+        console.warn(`[auth] openExternalURL falhou apos ${(performance.now() - openT0).toFixed(0)}ms`, err)
+        const msg = err instanceof Error ? err.message : 'Nao foi possivel abrir o navegador'
+        setError(msg)
+      })
       return flow
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Login failed'
@@ -52,5 +62,10 @@ export function useAuth() {
     }
   }, [])
 
-  return { pending, error, startLogin, pollLogin }
+  const resetLogin = useCallback(() => {
+    setPending(false)
+    setError(null)
+  }, [])
+
+  return { pending, error, startLogin, pollLogin, resetLogin }
 }

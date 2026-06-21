@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"glm5.2proxy/internal/accountpool"
@@ -17,12 +18,18 @@ import (
 
 func TestOAuthQuotaAndAccountRotation(t *testing.T) {
 	var chatToken string
+	var initAuth string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/oauth/cli/init":
-			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"flow_id": "flow-1", "authorize_url": "https://example.test/login", "poll_interval_sec": 1}})
+			initAuth = r.Header.Get("Authorization")
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"flow_id": "flow-1", "poll_token": "server-returned-token", "authorize_url": "https://example.test/login", "expires_at": 4102444800, "poll_interval_sec": 1}})
 		case r.URL.Path == "/oauth/cli/poll/flow-1":
+			if r.Header.Get("Authorization") != initAuth {
+				http.Error(w, `{"code":3001,"msg":"wrong poll token"}`, http.StatusUnauthorized)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"status": "ready", "token": "token-one", "user": map[string]any{"user_id": "one", "email": "one@example.test"}, "zai": map[string]any{"access_token": "access-one"}}})
 		case r.URL.Path == "/billing/current":
 			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"plans": []any{}}})
@@ -68,10 +75,34 @@ func TestOAuthQuotaAndAccountRotation(t *testing.T) {
 	}
 }
 
+func TestOAuthStartReportsEmptyHTTPStatusInsteadOfEOF(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer mock.Close()
+
+	cfg := testConfig(t)
+	cfg.OAuthBaseURL = mock.URL
+	store, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	oauth := auth.New(cfg, store)
+
+	_, err := oauth.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected OAuth start error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "HTTP 429") || strings.Contains(message, "EOF") {
+		t.Fatalf("unexpected OAuth error message: %q", message)
+	}
+}
+
 func TestAccountPoolRotatesBeforeChatWhenActiveQuotaIsExhausted(t *testing.T) {
 	var checkedTokens []string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
 		if r.URL.Path != "/billing/balance" {
 			http.NotFound(w, r)
 			return
@@ -111,6 +142,9 @@ func TestAccountPoolRotatesWhenAvailableIsBelowRequestReserve(t *testing.T) {
 	var checkedTokens []string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
 		if r.URL.Path != "/billing/balance" {
 			http.NotFound(w, r)
 			return
@@ -141,5 +175,119 @@ func TestAccountPoolRotatesWhenAvailableIsBelowRequestReserve(t *testing.T) {
 	}
 	if len(checkedTokens) != 2 || checkedTokens[0] != "Bearer low-token" || checkedTokens[1] != "Bearer fresh-token" {
 		t.Fatalf("unexpected quota check order: %+v", checkedTokens)
+	}
+}
+
+func TestAccountPoolPrefersLessUsedAccountBeforeHigherTokenAccount(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
+		if r.URL.Path != "/billing/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		available := 900
+		if token == "Bearer used-token" {
+			available = 3000000
+		}
+		json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"balances": []any{map[string]any{"show_name": "GLM-5.2", "total_units": 3000000, "used_units": 3000000 - available, "remaining_units": available, "available_units": available}}}})
+	}))
+	defer mock.Close()
+
+	cfg := testConfig(t)
+	cfg.BillingBaseURL = mock.URL + "/billing"
+	store, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	_, _ = store.Upsert(accounts.User{UserID: "used"}, "used-token", "")
+	_, _ = store.Upsert(accounts.User{UserID: "new"}, "new-token", "")
+
+	loader := upstream.NewLoader(cfg, store)
+	pool := accountpool.New(cfg, store, loader, quota.New(cfg))
+	pool.MarkRequest("used")
+	model, _ := models.Resolve("glm-5.2")
+	selection := pool.Select(context.Background(), model)
+	if selection.Account == nil || selection.Account.ID != "new" {
+		t.Fatalf("expected less-used new account to win balanced selection: %+v", selection)
+	}
+	if selection.RequestCount != 0 || selection.Available == nil || *selection.Available != 900 {
+		t.Fatalf("selection stats were not exposed correctly: %+v", selection)
+	}
+	if !strings.Contains(selection.Reason, "menos requests") {
+		t.Fatalf("selection reason should explain stats: %q", selection.Reason)
+	}
+}
+
+func TestAccountPoolSelectForRequestPicksHighestQuotaThatCoversRequest(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
+		if r.URL.Path != "/billing/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		availableByToken := map[string]int{
+			"Bearer low-token":  400000,
+			"Bearer high-token": 900000,
+			"Bearer max-token":  700000,
+		}
+		available := availableByToken[r.Header.Get("Authorization")]
+		json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"balances": []any{map[string]any{"show_name": "GLM-5.2", "total_units": 3000000, "used_units": 3000000 - available, "remaining_units": available, "available_units": available}}}})
+	}))
+	defer mock.Close()
+
+	cfg := testConfig(t)
+	cfg.BillingBaseURL = mock.URL + "/billing"
+	cfg.AccountMinAvailable = 1
+	store, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	_, _ = store.Upsert(accounts.User{UserID: "low"}, "low-token", "")
+	_, _ = store.Upsert(accounts.User{UserID: "high"}, "high-token", "")
+	_, _ = store.Upsert(accounts.User{UserID: "max"}, "max-token", "")
+
+	loader := upstream.NewLoader(cfg, store)
+	pool := accountpool.New(cfg, store, loader, quota.New(cfg))
+	model, _ := models.Resolve("glm-5.2")
+	pool.MarkRequest("high")
+	selection := pool.SelectForRequest(context.Background(), model, 500000, nil)
+	if selection.Account == nil || selection.Account.ID != "high" {
+		t.Fatalf("expected highest quota account to cover large request, got %+v", selection)
+	}
+	if selection.Available == nil || *selection.Available != 900000 {
+		t.Fatalf("selection did not expose highest available quota: %+v", selection)
+	}
+	if !strings.Contains(selection.Reason, "maior cota") {
+		t.Fatalf("selection reason should explain quota-first choice: %q", selection.Reason)
+	}
+}
+
+func TestAccountPoolSelectBestEffortIgnoresPreventiveQuotaCutoff(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if writeEmptyBillingCurrent(w, r) {
+			return
+		}
+		if r.URL.Path != "/billing/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"balances": []any{map[string]any{"show_name": "GLM-5.2", "total_units": 3000000, "used_units": 2999999, "remaining_units": 1, "available_units": 1}}}})
+	}))
+	defer mock.Close()
+
+	cfg := testConfig(t)
+	cfg.BillingBaseURL = mock.URL + "/billing"
+	cfg.AccountMinAvailable = 96000
+	store, _ := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	_, _ = store.Upsert(accounts.User{UserID: "low"}, "low-token", "")
+
+	loader := upstream.NewLoader(cfg, store)
+	pool := accountpool.New(cfg, store, loader, quota.New(cfg))
+	model, _ := models.Resolve("glm-5.2")
+	selection := pool.SelectBestEffort(context.Background(), model, nil)
+	if selection.Account == nil || selection.Account.ID != "low" || selection.AllExhausted {
+		t.Fatalf("expected best-effort mode to try saved account below cutoff: %+v", selection)
 	}
 }

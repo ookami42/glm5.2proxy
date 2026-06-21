@@ -24,6 +24,14 @@ func newRuntimeHeaderManager(cfg config.Config, bridge *captcha.Bridge) *runtime
 }
 
 func (m *runtimeHeaderManager) Prepare(ctx context.Context, value upstream.Config) (upstream.Config, error) {
+	return m.prepare(ctx, value, false)
+}
+
+func (m *runtimeHeaderManager) PrepareWithCaptcha(ctx context.Context, value upstream.Config) (upstream.Config, error) {
+	return m.prepare(ctx, value, true)
+}
+
+func (m *runtimeHeaderManager) prepare(ctx context.Context, value upstream.Config, forceCaptcha bool) (upstream.Config, error) {
 	headers := make(map[string]string, len(value.BaseHeaders)+4)
 	for key, headerValue := range value.BaseHeaders {
 		headers[key] = headerValue
@@ -31,12 +39,15 @@ func (m *runtimeHeaderManager) Prepare(ctx context.Context, value upstream.Confi
 	if strings.TrimSpace(headers["x-session-id"]) == "" {
 		headers["x-session-id"] = m.ensureSessionID(value)
 	}
-	if m.cfg.CaptchaEnabled {
-		token, err := m.captcha.Fresh(ctx)
+	if forceCaptcha {
+		challenge, err := m.captcha.FreshChallenge(ctx)
 		if err != nil {
 			return value, err
 		}
-		headers["x-aliyun-captcha-verify-param"] = token
+		headers["x-aliyun-captcha-verify-param"] = challenge.Token
+		if strings.TrimSpace(challenge.Region) != "" {
+			headers["x-aliyun-captcha-verify-region"] = challenge.Region
+		}
 	}
 	value.BaseHeaders = headers
 	return value, nil

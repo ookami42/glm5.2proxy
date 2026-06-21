@@ -23,9 +23,14 @@ type Request struct {
 	CreatedAt int64  `json:"createdAt"`
 }
 
+type Challenge struct {
+	Token  string
+	Region string
+}
+
 type result struct {
-	token string
-	err   error
+	challenge Challenge
+	err       error
 }
 
 type clientState struct {
@@ -45,12 +50,17 @@ func NewBridge(cfg config.Config) *Bridge {
 }
 
 func (b *Bridge) Fresh(ctx context.Context) (string, error) {
+	challenge, err := b.FreshChallenge(ctx)
+	return challenge.Token, err
+}
+
+func (b *Bridge) FreshChallenge(ctx context.Context) (Challenge, error) {
 	if !b.cfg.CaptchaEnabled {
-		return "", NewError(ErrDisabled, "captcha bridge is disabled")
+		return Challenge{}, NewError(ErrDisabled, "captcha bridge is disabled")
 	}
 	client := b.chooseClient()
 	if client == nil {
-		return "", NewError(ErrBrowserUnavailable, "fresh captcha browser is unavailable")
+		return Challenge{}, NewError(ErrBrowserUnavailable, "fresh captcha browser is unavailable")
 	}
 	id := randomID()
 	waiter := make(chan result, 1)
@@ -62,19 +72,19 @@ func (b *Bridge) Fresh(ctx context.Context) (string, error) {
 	case client.requests <- request:
 	case <-ctx.Done():
 		b.deleteWaiter(id)
-		return "", ctx.Err()
+		return Challenge{}, ctx.Err()
 	}
 	timer := time.NewTimer(b.cfg.CaptchaTimeout)
 	defer timer.Stop()
 	select {
 	case value := <-waiter:
-		return value.token, value.err
+		return value.challenge, value.err
 	case <-timer.C:
 		b.deleteWaiter(id)
-		return "", NewError(ErrTimeout, "timed out waiting for captcha browser")
+		return Challenge{}, NewError(ErrTimeout, "timed out waiting for captcha browser")
 	case <-ctx.Done():
 		b.deleteWaiter(id)
-		return "", ctx.Err()
+		return Challenge{}, ctx.Err()
 	}
 }
 
@@ -101,9 +111,10 @@ func (b *Bridge) Poll(w http.ResponseWriter, r *http.Request) {
 
 func (b *Bridge) Submit(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID    string `json:"id"`
-		Token string `json:"token"`
-		Error string `json:"error"`
+		ID     string `json:"id"`
+		Token  string `json:"token"`
+		Region string `json:"region"`
+		Error  string `json:"error"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -122,7 +133,7 @@ func (b *Bridge) Submit(w http.ResponseWriter, r *http.Request) {
 	} else if strings.TrimSpace(body.Token) == "" {
 		waiter <- result{err: NewError(ErrEmptyToken, "captcha browser returned an empty token")}
 	} else {
-		waiter <- result{token: strings.TrimSpace(body.Token)}
+		waiter <- result{challenge: Challenge{Token: strings.TrimSpace(body.Token), Region: strings.TrimSpace(body.Region)}}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

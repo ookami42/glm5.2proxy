@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/hooks/use-auth'
@@ -10,48 +10,68 @@ interface LoginDialogProps {
 }
 
 export function LoginDialog({ open, onOpenChange, onSuccess }: LoginDialogProps) {
-  const { pending, error, startLogin, pollLogin } = useAuth()
+  const { pending, error, startLogin, pollLogin, resetLogin } = useAuth()
   const [flowId, setFlowId] = useState<string | null>(null)
+  const [pollIntervalMs, setPollIntervalMs] = useState(2000)
   const [status, setStatus] = useState<string>('')
+  const pollingRef = useRef(false)
 
   useEffect(() => {
     if (!open) {
       setFlowId(null)
+      setPollIntervalMs(2000)
       setStatus('')
+      pollingRef.current = false
+      resetLogin()
     }
-  }, [open])
+  }, [open, resetLogin])
 
   useEffect(() => {
     if (!flowId || !pending) return
 
     const poll = async () => {
+      if (pollingRef.current) return
+      pollingRef.current = true
       try {
         const result = await pollLogin(flowId)
         setStatus(result.status)
         if (result.status === 'ready') {
+          resetLogin()
           onSuccess()
           onOpenChange(false)
         }
       } catch {
+        setStatus('failed')
         // The hook exposes the error in the dialog.
+      } finally {
+        pollingRef.current = false
       }
     }
 
     void poll()
-    const interval = setInterval(poll, 2000)
+    const interval = setInterval(poll, pollIntervalMs)
     return () => clearInterval(interval)
-  }, [flowId, pending, pollLogin, onSuccess, onOpenChange])
+  }, [flowId, pending, pollIntervalMs, pollLogin, resetLogin, onSuccess, onOpenChange])
 
   const handleLogin = async () => {
     try {
       const flow = await startLogin()
       if (flow.flowId) {
         setFlowId(flow.flowId)
+        setPollIntervalMs(Math.max(1000, (flow.pollIntervalSec || 2) * 1000))
         setStatus('pending')
       }
     } catch {
       // The hook exposes the error in the dialog.
     }
+  }
+
+  const handleRetry = () => {
+    setFlowId(null)
+    setPollIntervalMs(2000)
+    setStatus('')
+    pollingRef.current = false
+    resetLogin()
   }
 
   return (
@@ -82,19 +102,28 @@ export function LoginDialog({ open, onOpenChange, onSuccess }: LoginDialogProps)
             </>
           ) : (
             <div className="flex flex-col items-center gap-3">
-              <div className="h-12 w-12 rounded-full border-4 border-muted border-t-foreground animate-spin" />
+              <div className={pending ? 'h-12 w-12 rounded-full border-4 border-muted border-t-foreground animate-spin' : 'h-12 w-12 rounded-full border-4 border-destructive'} />
               <div className="text-center">
-                <p className="text-sm font-medium">Aguardando autenticação...</p>
+                <p className="text-sm font-medium">{pending ? 'Aguardando autenticação...' : 'Login não concluído'}</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {status === 'pending' ? 'Complete o login no navegador' : status}
+                  {error
+                    ? 'Reinicie o login e tente novamente'
+                    : status === 'pending' ? 'Complete o login no navegador' : status}
                 </p>
               </div>
             </div>
           )}
           {error && (
-            <p role="alert" className="text-sm text-destructive text-center">
-              {error}
-            </p>
+            <div className="flex w-full flex-col items-center gap-3">
+              <p role="alert" className="text-sm text-destructive text-center">
+                {error}
+              </p>
+              {flowId && (
+                <Button type="button" variant="outline" size="sm" onClick={handleRetry}>
+                  Reiniciar login
+                </Button>
+              )}
+            </div>
           )}
         </div>
       </DialogContent>

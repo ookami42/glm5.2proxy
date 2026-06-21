@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 import { motion, Reorder, useDragControls } from 'framer-motion'
 import {
@@ -14,7 +15,9 @@ import {
   RotateCcw,
   Save,
   SquareCode,
+  Trash2,
   UserRound,
+  X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -29,10 +32,15 @@ interface AccountCardProps {
   isFirst: boolean
   isLast: boolean
   refreshing: boolean
+  activatePending: boolean
+  zcodePending: boolean
+  deletePending: boolean
+  actionsDisabled: boolean
   globalThinking: ThinkingSettings | null
   accountThinking: ThinkingSettings | null
-  onActivate: () => void
+  onActivate: () => Promise<void>
   onApplyZCode: () => Promise<void>
+  onDelete: () => Promise<void>
   onMoveUp: () => void
   onMoveDown: () => void
   onRefresh: () => void
@@ -41,6 +49,11 @@ interface AccountCardProps {
   onResetThinking: () => Promise<void>
   zcodeSyncStatus?: 'idle' | 'syncing' | 'synced' | 'skipped' | 'error'
   zcodeSyncMessage?: string | null
+}
+
+interface HoverHintProps {
+  content: string
+  children: ReactNode
 }
 
 const DEFAULT_THINKING: ThinkingSettings = {
@@ -77,6 +90,24 @@ function clampBudget(value: number): number {
 
 function effortLabel(value: ThinkingEffort): string {
   return EFFORT_OPTIONS.find((option) => option.value === value)?.label ?? value
+}
+
+function HoverHint({ content, children }: HoverHintProps) {
+  return (
+    <div className="group/tooltip relative">
+      {children}
+      <div
+        className={cn(
+          'pointer-events-none absolute bottom-full right-0 z-30 mb-2 w-72 rounded-md border border-border/70 bg-popover px-3 py-2 text-[11px] leading-relaxed text-popover-foreground shadow-xl',
+          'opacity-0 translate-y-1 transition-all duration-150',
+          'group-hover/tooltip:translate-y-0 group-hover/tooltip:opacity-100',
+          'group-focus-within/tooltip:translate-y-0 group-focus-within/tooltip:opacity-100'
+        )}
+      >
+        {content}
+      </div>
+    </div>
+  )
 }
 
 function ModelQuota({ balance }: { balance: QuotaBalance }) {
@@ -291,10 +322,15 @@ export function AccountCard({
   isFirst,
   isLast,
   refreshing,
+  activatePending,
+  zcodePending,
+  deletePending,
+  actionsDisabled,
   globalThinking,
   accountThinking,
   onActivate,
   onApplyZCode,
+  onDelete,
   onMoveUp,
   onMoveDown,
   onRefresh,
@@ -307,29 +343,57 @@ export function AccountCard({
   const dragControls = useDragControls()
   const displayName = account.user.name || account.label
   const email = account.user.email || account.user.id || account.id
-  const [applyingZCode, setApplyingZCode] = useState(false)
   const [zcodeMessage, setZCodeMessage] = useState<string | null>(null)
-  const effectiveZCodeStatus = applyingZCode ? 'syncing' : zcodeSyncStatus
+  const [deleteConfirming, setDeleteConfirming] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const effectiveZCodeStatus = zcodePending ? 'syncing' : zcodeSyncStatus
   const effectiveZCodeMessage = zcodeMessage ?? zcodeSyncMessage
+  const activateTooltip = isActive
+    ? 'Esta ja e a conta ativa do proxy.'
+    : 'Troca somente a conta ativa do proxy e da API OpenAI-compatible. Nao mexe no ZCode.'
+  const applyZCodeTooltip = account.hasZcodeJwtToken
+    ? 'So grava esta conta dentro do app ZCode detectado. Nao muda a conta ativa do proxy.'
+    : 'Essa conta nao tem JWT salvo. Faca login novamente nela para conseguir aplicar no ZCode.'
+  const deleteTooltip = isActive
+    ? 'Remove esta conta do proxy. Se ela estiver ativa, o proxy escolhe a proxima conta salva sem mexer no ZCode.'
+    : 'Remove esta conta salva do proxy. Isso nao apaga a conta na Z.ai.'
+
+  useEffect(() => {
+    setDeleteConfirming(false)
+    setDeleteError(null)
+  }, [account.id])
+
+  const activateAccount = async () => {
+    if (isActive || activatePending || actionsDisabled) return
+    setZCodeMessage(null)
+    try {
+      await onActivate()
+    } catch (err) {
+      setZCodeMessage(err instanceof Error ? err.message : 'Nao foi possivel ativar conta')
+    }
+  }
 
   const applyZCode = async () => {
     if (!account.hasZcodeJwtToken) {
       setZCodeMessage('Essa conta antiga nao tem JWT salvo; faca login novamente nela para conseguir migrar para o ZCode.')
       return
     }
-    setApplyingZCode(true)
     setZCodeMessage(null)
     try {
       await onApplyZCode()
-      setZCodeMessage(
-        account.hasZaiAccessToken
-          ? 'Aplicada no ZCode com JWT e sessao OAuth. Com o bridge v2 instalado, a janela do ZCode recarrega para mostrar o perfil certo.'
-          : 'Aplicada no ZCode usando JWT antigo. Se o ZCode pedir login, essa conta precisa ser recadastrada.'
-      )
+      setZCodeMessage(null)
     } catch (err) {
       setZCodeMessage(err instanceof Error ? err.message : 'Nao foi possivel aplicar no ZCode')
-    } finally {
-      setApplyingZCode(false)
+    }
+  }
+
+  const deleteAccount = async () => {
+    if (deletePending) return
+    setDeleteError(null)
+    try {
+      await onDelete()
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Nao foi possivel apagar a conta')
     }
   }
 
@@ -429,30 +493,82 @@ export function AccountCard({
                 <Button variant="ghost" size="icon" title="Mover para baixo" disabled={isLast} onClick={onMoveDown}>
                   <ArrowDown className="h-4 w-4" />
                 </Button>
-                <Button
-                  variant={isActive ? 'secondary' : 'outline'}
-                  size="sm"
-                  disabled={isActive}
-                  onClick={onActivate}
-                >
-                  {isActive ? 'Conta ativa' : 'Usar agora'}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={applyingZCode || !account.hasZcodeJwtToken}
-                  onClick={applyZCode}
-                  title={account.hasZcodeJwtToken ? 'Grava esta conta no ambiente interno do app ZCode' : 'Conta antiga sem JWT salvo'}
-                >
-                  <SquareCode className="h-3.5 w-3.5" />
-                  {applyingZCode ? 'Aplicando...' : 'Aplicar no ZCode'}
-                </Button>
+                {deleteConfirming ? (
+                  <div className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/7 p-1">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      disabled={deletePending}
+                      onClick={() => { void deleteAccount() }}
+                    >
+                      {deletePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                      Confirmar
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                      disabled={deletePending}
+                      onClick={() => {
+                        setDeleteConfirming(false)
+                        setDeleteError(null)
+                      }}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  <HoverHint content={deleteTooltip}>
+                    <span className="inline-flex">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:bg-red-500/10 hover:text-red-400"
+                        title="Apagar conta"
+                        disabled={actionsDisabled}
+                        onClick={() => setDeleteConfirming(true)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </span>
+                  </HoverHint>
+                )}
+                <HoverHint content={activateTooltip}>
+                  <span className="inline-flex">
+                    <Button
+                      variant={isActive ? 'secondary' : 'outline'}
+                      size="sm"
+                      disabled={isActive || activatePending || actionsDisabled}
+                      onClick={() => { void activateAccount() }}
+                    >
+                      {activatePending ? 'Ativando...' : isActive ? 'Conta ativa' : 'Usar agora'}
+                    </Button>
+                  </span>
+                </HoverHint>
+                <HoverHint content={applyZCodeTooltip}>
+                  <span className="inline-flex">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={zcodePending || actionsDisabled || !account.hasZcodeJwtToken}
+                      onClick={() => { void applyZCode() }}
+                    >
+                      <SquareCode className="h-3.5 w-3.5" />
+                      {zcodePending ? 'Aplicando...' : 'Aplicar no ZCode'}
+                    </Button>
+                  </span>
+                </HoverHint>
               </div>
             </div>
 
             {zcodeMessage && (
               <p className="mt-3 rounded-md border border-sky-500/25 bg-sky-500/5 px-3 py-2 text-[11px] text-sky-300">
                 {zcodeMessage}
+              </p>
+            )}
+            {deleteError && (
+              <p className="mt-3 rounded-md border border-red-500/25 bg-red-500/5 px-3 py-2 text-[11px] text-red-400">
+                {deleteError}
               </p>
             )}
             <div
@@ -478,7 +594,7 @@ export function AccountCard({
               <span>
                 {effectiveZCodeMessage ??
                   (account.hasZcodeJwtToken
-                    ? 'Ao usar esta conta, o proxy tenta aplicar ela automaticamente no app ZCode detectado.'
+                    ? 'Use Aplicar no ZCode para gravar esta conta no app ZCode detectado.'
                     : 'Conta sem JWT salvo; nao da para aplicar no ZCode sem fazer login novamente.')}
               </span>
             </div>
@@ -491,14 +607,25 @@ export function AccountCard({
             />
 
             {account.quota ? (
-              <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                {account.quota.balances.map((balance) => (
-                  <ModelQuota key={balance.id || balance.model} balance={balance} />
-                ))}
+              <div className="mt-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {account.quota.balances.map((balance) => (
+                    <ModelQuota key={balance.id || balance.model} balance={balance} />
+                  ))}
+                </div>
+                {account.quotaLoading && (
+                  <p className="mt-2 text-[11px] text-muted-foreground">Atualizando cota...</p>
+                )}
               </div>
+            ) : account.quotaLoading ? (
+              <div className="mt-4 h-[74px] animate-pulse rounded-md bg-muted/60" />
             ) : account.quotaError ? (
               <div className="mt-4 rounded-md border border-red-500/25 bg-red-500/5 px-3 py-2 text-xs text-red-400">
                 Nao foi possivel consultar a cota: {account.quotaError.message}
+              </div>
+            ) : account.quotaSkipped ? (
+              <div className="mt-4 rounded-md border border-border/60 bg-background/35 px-3 py-2 text-xs text-muted-foreground">
+                Cota nao carregada nesta atualizacao.
               </div>
             ) : (
               <div className="mt-4 h-[74px] animate-pulse rounded-md bg-muted/60" />

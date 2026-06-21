@@ -2,6 +2,8 @@ package quota
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"glm5.2proxy/internal/config"
@@ -60,59 +63,254 @@ type Snapshot struct {
 }
 
 type Service struct {
-	cfg    config.Config
-	client *http.Client
+	cfg              config.Config
+	client           *http.Client
+	requestGate      chan struct{}
+	lastRequestAt    time.Time
+	snapshotCacheMu  sync.Mutex
+	snapshotCache    map[string]snapshotCacheEntry
+	snapshotInFlight map[string]chan struct{}
+	balanceCache     map[string]balanceCacheEntry
+	balanceInFlight  map[string]chan struct{}
+}
+
+type snapshotCacheEntry struct {
+	snapshot  Snapshot
+	err       error
+	updatedAt time.Time
+}
+
+type balanceCacheEntry struct {
+	body      map[string]any
+	err       error
+	updatedAt time.Time
 }
 
 func New(cfg config.Config) *Service {
-	return &Service{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}}
+	return &Service{
+		cfg:              cfg,
+		client:           &http.Client{Timeout: 15 * time.Second},
+		requestGate:      make(chan struct{}, 1),
+		snapshotCache:    map[string]snapshotCacheEntry{},
+		snapshotInFlight: map[string]chan struct{}{},
+		balanceCache:     map[string]balanceCacheEntry{},
+		balanceInFlight:  map[string]chan struct{}{},
+	}
 }
 
 func (s *Service) Snapshot(ctx context.Context, upstreamConfig upstream.Config) (Snapshot, error) {
-	type result struct {
-		kind string
-		body map[string]any
-		err  error
+	if usesUsageQuota(upstreamConfig) {
+		return s.usageQuotaSnapshot(ctx, upstreamConfig)
 	}
-	channel := make(chan result, 2)
-	for _, kind := range []string{"current", "balance"} {
-		go func(kind string) {
-			body, err := s.fetch(ctx, upstreamConfig, kind)
-			channel <- result{kind: kind, body: body, err: err}
-		}(kind)
+	current, err := s.fetch(ctx, upstreamConfig, "current")
+	if err != nil {
+		return Snapshot{}, err
 	}
-	var current, balance map[string]any
-	for range 2 {
-		item := <-channel
-		if item.err != nil {
-			return Snapshot{}, item.err
-		}
-		if item.kind == "current" {
-			current = item.body
-		} else {
-			balance = item.body
-		}
+	balance, err := s.fetch(ctx, upstreamConfig, "balance")
+	if err != nil {
+		return Snapshot{}, err
 	}
 	return normalizeSnapshot(current, balance), nil
+}
+
+func (s *Service) BalanceSnapshot(ctx context.Context, upstreamConfig upstream.Config) (Snapshot, error) {
+	if usesUsageQuota(upstreamConfig) {
+		return s.usageQuotaSnapshot(ctx, upstreamConfig)
+	}
+	balance, err := s.freshBalance(ctx, upstreamConfig)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return normalizeBalanceSnapshot(balance), nil
+}
+
+func (s *Service) SnapshotCached(ctx context.Context, upstreamConfig upstream.Config, maxAge time.Duration) (Snapshot, error) {
+	key := s.snapshotCacheKey(upstreamConfig)
+	for {
+		s.snapshotCacheMu.Lock()
+		if entry, ok := s.snapshotCache[key]; ok && time.Since(entry.updatedAt) <= maxAge {
+			s.snapshotCacheMu.Unlock()
+			return entry.snapshot, entry.err
+		}
+		if inFlight, ok := s.snapshotInFlight[key]; ok {
+			s.snapshotCacheMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return Snapshot{}, ctx.Err()
+			case <-inFlight:
+				continue
+			}
+		}
+		inFlight := make(chan struct{})
+		s.snapshotInFlight[key] = inFlight
+		s.snapshotCacheMu.Unlock()
+
+		snapshot, err := s.Snapshot(ctx, upstreamConfig)
+
+		s.snapshotCacheMu.Lock()
+		s.snapshotCache[key] = snapshotCacheEntry{snapshot: snapshot, err: err, updatedAt: time.Now()}
+		close(inFlight)
+		delete(s.snapshotInFlight, key)
+		s.snapshotCacheMu.Unlock()
+		return snapshot, err
+	}
 }
 
 func (s *Service) ModelBalance(ctx context.Context, upstreamConfig upstream.Config, model models.Model) (*Balance, error) {
 	if !upstreamConfig.HasAuthorization {
 		return nil, nil
 	}
-	body, err := s.fetch(ctx, upstreamConfig, "balance")
+	if usesUsageQuota(upstreamConfig) {
+		snapshot, err := s.usageQuotaSnapshot(ctx, upstreamConfig)
+		if err != nil {
+			return nil, err
+		}
+		for _, balance := range snapshot.Balances {
+			if strings.EqualFold(balance.Model, model.UpstreamID) {
+				copy := balance
+				return &copy, nil
+			}
+		}
+		return nil, nil
+	}
+	body, err := s.freshBalance(ctx, upstreamConfig)
 	if err != nil {
 		return nil, err
 	}
+	return modelBalanceFromBody(body, model), nil
+}
+
+func (s *Service) ModelBalanceCached(ctx context.Context, upstreamConfig upstream.Config, model models.Model, maxAge time.Duration) (*Balance, error) {
+	if !upstreamConfig.HasAuthorization {
+		return nil, nil
+	}
+	if usesUsageQuota(upstreamConfig) {
+		return s.ModelBalance(ctx, upstreamConfig, model)
+	}
+	if maxAge <= 0 {
+		return s.ModelBalance(ctx, upstreamConfig, model)
+	}
+	body, err := s.balanceBodyCached(ctx, upstreamConfig, maxAge)
+	if err != nil {
+		return nil, err
+	}
+	return modelBalanceFromBody(body, model), nil
+}
+
+func modelBalanceFromBody(body map[string]any, model models.Model) *Balance {
 	data := object(body["data"])
 	for _, item := range array(data["balances"]) {
 		value := object(item)
 		if strings.EqualFold(text(value["show_name"]), model.UpstreamID) {
 			balance := normalizeBalance(value)
-			return &balance, nil
+			return &balance
 		}
 	}
-	return nil, nil
+	return nil
+}
+
+func (s *Service) balanceBodyCached(ctx context.Context, upstreamConfig upstream.Config, maxAge time.Duration) (map[string]any, error) {
+	key := s.snapshotCacheKey(upstreamConfig)
+	for {
+		s.snapshotCacheMu.Lock()
+		if entry, ok := s.balanceCache[key]; ok && time.Since(entry.updatedAt) <= maxAge {
+			s.snapshotCacheMu.Unlock()
+			return entry.body, entry.err
+		}
+		if inFlight, ok := s.balanceInFlight[key]; ok {
+			s.snapshotCacheMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-inFlight:
+				continue
+			}
+		}
+		inFlight := make(chan struct{})
+		s.balanceInFlight[key] = inFlight
+		s.snapshotCacheMu.Unlock()
+
+		body, err := s.freshBalance(ctx, upstreamConfig)
+
+		s.snapshotCacheMu.Lock()
+		s.balanceCache[key] = balanceCacheEntry{body: body, err: err, updatedAt: time.Now()}
+		close(inFlight)
+		delete(s.balanceInFlight, key)
+		s.snapshotCacheMu.Unlock()
+		return body, err
+	}
+}
+
+func (s *Service) freshBalance(ctx context.Context, upstreamConfig upstream.Config) (map[string]any, error) {
+	if _, err := s.fetch(ctx, upstreamConfig, "current"); err != nil {
+		return nil, err
+	}
+	return s.fetch(ctx, upstreamConfig, "balance")
+}
+
+func (s *Service) snapshotCacheKey(upstreamConfig upstream.Config) string {
+	hash := sha256.Sum256([]byte(strings.Join([]string{
+		s.cfg.BillingBaseURL,
+		upstreamConfig.QuotaEndpoint,
+		upstreamConfig.QuotaAuthorization,
+		upstreamConfig.BaseHeaders["authorization"],
+		upstreamConfig.BaseHeaders["x-zcode-app-version"],
+	}, "\x00")))
+	return hex.EncodeToString(hash[:])
+}
+
+func usesUsageQuota(upstreamConfig upstream.Config) bool {
+	return strings.TrimSpace(upstreamConfig.QuotaEndpoint) != "" && strings.TrimSpace(upstreamConfig.QuotaAuthorization) != ""
+}
+
+func (s *Service) usageQuotaSnapshot(ctx context.Context, upstreamConfig upstream.Config) (Snapshot, error) {
+	body, err := s.fetchUsageQuota(ctx, upstreamConfig)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return normalizeUsageQuotaSnapshot(body), nil
+}
+
+func (s *Service) fetchUsageQuota(ctx context.Context, upstreamConfig upstream.Config) (map[string]any, error) {
+	release, err := s.beginRequest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamConfig.QuotaEndpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", upstreamConfig.QuotaAuthorization)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", first(upstreamConfig.BaseHeaders["user-agent"], "ZCode/"+s.cfg.AppVersion))
+	response, err := s.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, billingStatusError("usage-quota", response.StatusCode, raw)
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, fmt.Errorf("billing usage-quota failed: HTTP %d empty response body", response.StatusCode)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if !successfulCode(body["code"]) {
+		return nil, fmt.Errorf("billing usage-quota failed: HTTP %d %s", response.StatusCode, first(text(body["msg"]), text(body["message"])))
+	}
+	if success, ok := body["success"].(bool); ok && !success {
+		return nil, fmt.Errorf("billing usage-quota failed: HTTP %d %s", response.StatusCode, first(text(body["msg"]), text(body["message"])))
+	}
+	return body, nil
 }
 
 func (s *Service) fetch(ctx context.Context, upstreamConfig upstream.Config, kind string) (map[string]any, error) {
@@ -138,6 +336,12 @@ func (s *Service) fetch(ctx context.Context, upstreamConfig upstream.Config, kin
 }
 
 func (s *Service) fetchOnce(ctx context.Context, upstreamConfig upstream.Config, kind string) (map[string]any, error) {
+	release, err := s.beginRequest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	appVersion := upstreamConfig.BaseHeaders["x-zcode-app-version"]
 	if appVersion == "" {
 		appVersion = s.cfg.AppVersion
@@ -155,14 +359,63 @@ func (s *Service) fetchOnce(ctx context.Context, upstreamConfig upstream.Config,
 		return nil, err
 	}
 	defer response.Body.Close()
-	var body map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
 		return nil, err
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || integer(body["code"]) != 0 {
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, billingStatusError(kind, response.StatusCode, raw)
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, fmt.Errorf("billing %s failed: HTTP %d empty response body", kind, response.StatusCode)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if integer(body["code"]) != 0 {
 		return nil, fmt.Errorf("billing %s failed: HTTP %d %s", kind, response.StatusCode, first(text(body["msg"]), text(body["message"])))
 	}
 	return body, nil
+}
+
+func (s *Service) beginRequest(ctx context.Context) (func(), error) {
+	select {
+	case s.requestGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		<-s.requestGate
+	}
+	wait := s.lastRequestAt.Add(150 * time.Millisecond).Sub(time.Now())
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			release()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	s.lastRequestAt = time.Now()
+	return release, nil
+}
+
+func billingStatusError(kind string, statusCode int, raw []byte) error {
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	message := first(text(body["msg"]), text(body["message"]), http.StatusText(statusCode))
+	if strings.TrimSpace(string(raw)) == "" {
+		message = strings.TrimSpace(message + " (empty response body)")
+	}
+	return fmt.Errorf("billing %s failed: HTTP %d %s", kind, statusCode, message)
 }
 
 func retryable(err error) bool {
@@ -173,7 +426,7 @@ func retryable(err error) bool {
 		return true
 	}
 	value := strings.ToLower(err.Error())
-	return strings.Contains(value, "connection reset") || strings.Contains(value, "server closed idle connection") || strings.Contains(value, "timeout")
+	return strings.Contains(value, "http 429") || strings.Contains(value, "connection reset") || strings.Contains(value, "server closed idle connection") || strings.Contains(value, "timeout")
 }
 
 func normalizeSnapshot(current, balances map[string]any) Snapshot {
@@ -192,6 +445,70 @@ func normalizeSnapshot(current, balances map[string]any) Snapshot {
 	out.ServerTime = unixTime(balanceData["server_time"])
 	for _, item := range array(balanceData["balances"]) {
 		out.Balances = append(out.Balances, normalizeBalance(object(item)))
+	}
+	return out
+}
+
+func normalizeBalanceSnapshot(balances map[string]any) Snapshot {
+	out := Snapshot{Object: "zcode.quota", GeneratedAt: time.Now().UTC(), Plans: []Plan{}, Balances: []Balance{}}
+	balanceData := object(balances["data"])
+	out.ServerTime = unixTime(balanceData["server_time"])
+	for _, item := range array(balanceData["balances"]) {
+		out.Balances = append(out.Balances, normalizeBalance(object(item)))
+	}
+	return out
+}
+
+func normalizeUsageQuotaSnapshot(body map[string]any) Snapshot {
+	out := Snapshot{Object: "zcode.quota", GeneratedAt: time.Now().UTC(), Plans: []Plan{}, Balances: []Balance{}}
+	data := object(body["data"])
+	level := text(data["level"])
+	plan := Plan{ID: first(level, "coding-plan"), Name: first(level, "Coding Plan"), Status: "active", Entitlements: []Entitlement{}}
+	for _, item := range array(data["limits"]) {
+		limit := object(item)
+		balances := usageLimitBalances(limit)
+		for _, balance := range balances {
+			out.Balances = append(out.Balances, balance)
+			plan.Entitlements = append(plan.Entitlements, Entitlement{
+				ID: balance.ID, Model: balance.Model, Meter: balance.Meter, UnitType: balance.UnitType, Granted: balance.Total, Period: "current",
+			})
+		}
+	}
+	if len(plan.Entitlements) > 0 || level != "" {
+		out.Plans = append(out.Plans, plan)
+	}
+	return out
+}
+
+func usageLimitBalances(limit map[string]any) []Balance {
+	limitType := first(text(limit["type"]), "usage")
+	total := intPointer(firstNumber(limit["number"], limit["unit"]))
+	used := intPointer(firstNumber(limit["usage"], limit["currentValue"]))
+	remaining := intPointer(limit["remaining"])
+	var percent *float64
+	if total != nil && remaining != nil && *total > 0 {
+		value := float64(*remaining) / float64(*total)
+		percent = &value
+	}
+	details := array(limit["usageDetails"])
+	if len(details) == 0 {
+		return []Balance{{
+			ID: limitType, Model: limitType, Meter: limitType, UnitType: "tokens",
+			Total: total, Used: used, Remaining: remaining, Available: remaining, UsagePercent: percent,
+		}}
+	}
+	out := make([]Balance, 0, len(details))
+	for _, item := range details {
+		detail := object(item)
+		model := first(text(detail["modelCode"]), text(detail["displayName"]), limitType)
+		detailUsed := used
+		if value := intPointer(detail["usage"]); value != nil {
+			detailUsed = value
+		}
+		out = append(out, Balance{
+			ID: first(model, limitType), Model: model, Meter: limitType, UnitType: "tokens",
+			Total: total, Used: detailUsed, Remaining: remaining, Available: remaining, UsagePercent: percent,
+		})
 	}
 	return out
 }
@@ -256,6 +573,35 @@ func array(value any) []any {
 func text(value any) string {
 	result, _ := value.(string)
 	return result
+}
+
+func firstNumber(values ...any) any {
+	for _, value := range values {
+		if integer(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func successfulCode(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case float64:
+		return typed == 0 || typed == 200
+	case int:
+		return typed == 0 || typed == 200
+	case int64:
+		return typed == 0 || typed == 200
+	case json.Number:
+		result, _ := typed.Int64()
+		return result == 0 || result == 200
+	case string:
+		return typed == "0" || typed == "200"
+	default:
+		return false
+	}
 }
 
 func first(values ...string) string {
