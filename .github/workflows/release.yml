@@ -56,10 +56,81 @@ jobs:
             build/bin/glm5.2proxy.exe
             build/bin/glm5.2proxy.exe.sha256
 
+  linux-desktop:
+    name: Linux desktop
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.0-dev libglib2.0-dev
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cmd/desktop/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: cmd/desktop/frontend
+        run: npm ci
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build Wails desktop app
+        run: npm run desktop:build
+
+      - name: Package Linux binary
+        run: |
+          tar -C build/bin -czf build/bin/glm5.2proxy-linux-amd64.tar.gz glm5.2proxy
+          sha256sum build/bin/glm5.2proxy-linux-amd64.tar.gz > build/bin/glm5.2proxy-linux-amd64.tar.gz.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glm5.2proxy-linux-amd64
+          path: |
+            build/bin/glm5.2proxy-linux-amd64.tar.gz
+            build/bin/glm5.2proxy-linux-amd64.tar.gz.sha256
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - windows-desktop
+      - linux-desktop
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: glm5.2proxy-windows
+          path: release-assets/windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: glm5.2proxy-linux-amd64
+          path: release-assets/linux
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/bin/glm5.2proxy.exe
-            build/bin/glm5.2proxy.exe.sha256
+            release-assets/windows/glm5.2proxy.exe
+            release-assets/windows/glm5.2proxy.exe.sha256
+            release-assets/linux/glm5.2proxy-linux-amd64.tar.gz
+            release-assets/linux/glm5.2proxy-linux-amd64.tar.gz.sha256
