@@ -35,6 +35,10 @@ jobs:
         working-directory: cmd/desktop/frontend
         run: npm ci
 
+      - name: Build frontend assets for Go embed
+        working-directory: cmd/desktop/frontend
+        run: npm run build
+
       - name: Run Go tests
         run: go test ./...
 
@@ -85,6 +89,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: cmd/desktop/frontend
         run: npm ci
+
+      - name: Build frontend assets for Go embed
+        working-directory: cmd/desktop/frontend
+        run: npm run build
 
       - name: Run Go tests
         run: go test ./...
