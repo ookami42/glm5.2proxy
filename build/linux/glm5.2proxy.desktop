@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=GLM 5.2 Proxy
+Comment=GLM 5.2 Proxy - Desktop application
+Exec=/usr/local/bin/glm5.2proxy
+Icon=glm5.2proxy
+Terminal=false
+Type=Application
+Categories=Utility;

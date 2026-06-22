@@ -9,6 +9,7 @@
     "desktop:go-build": "go build -trimpath -o build/glm5.2proxy-desktop.exe .",
     "desktop:dev": "go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 dev",
     "desktop:build": "go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build",
+    "build:ubuntu": "TAG=$(git describe --tags --always 2>/dev/null || echo 'dev') && VERSION=${TAG#v} && go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -tags webkit2_41 && PKG=glm5.2proxy_${VERSION}_amd64 && mkdir -p ${PKG}/DEBIAN ${PKG}/usr/local/bin ${PKG}/usr/share/applications ${PKG}/usr/share/icons/hicolor/256x256/apps && printf '%s\\n' 'Package: glm5.2proxy' \"Version: ${VERSION}\" 'Architecture: amd64' 'Maintainer: maicon2' 'Description: GLM 5.2 Proxy - Desktop application' 'Depends: libgtk-3-0, libwebkit2gtk-4.1-0, libappindicator3-1, librsvg2-2' > ${PKG}/DEBIAN/control && cp build/bin/glm5.2proxy ${PKG}/usr/local/bin/ && cp build/linux/glm5.2proxy.desktop ${PKG}/usr/share/applications/ && cp build/appicon.png ${PKG}/usr/share/icons/hicolor/256x256/apps/glm5.2proxy.png && dpkg-deb --root-owner-group --build ${PKG} && mkdir -p dist && mv ${PKG}.deb dist/ && mv build/bin/glm5.2proxy build/bin/glm5.2proxy-${TAG}",
     "zcode:patch-live-refresh": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/patch-zcode-live-refresh.ps1",
     "zcode:restore": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/patch-zcode-live-refresh.ps1 -Restore",
     "test": "go test ./...",
