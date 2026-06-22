@@ -2,6 +2,7 @@ package tests
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -40,6 +41,41 @@ func TestAccountStoreEncryptionOrderingAndActivation(t *testing.T) {
 	}
 	if reloaded.Active().ID != "two" || len(reloaded.Accounts()) != 2 {
 		t.Fatalf("store did not survive reload: %+v", reloaded.Active())
+	}
+}
+
+func TestAccountStoreRemoveWritesEncryptedBackup(t *testing.T) {
+	cfg := testConfig(t)
+	store, err := accounts.NewStore(cfg.CredentialsPath, cfg.CredentialSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Upsert(accounts.User{UserID: "one", Email: "one@example.test"}, "token-one", "zai-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Upsert(accounts.User{UserID: "two", Email: "two@example.test"}, "token-two", "zai-two"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.Remove("one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("expected account to be removed")
+	}
+	backups, err := filepath.Glob(filepath.Join(filepath.Dir(cfg.CredentialsPath), "backups", filepath.Base(cfg.CredentialsPath)+".*.bak"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("expected one encrypted backup, got %d: %+v", len(backups), backups)
+	}
+	raw, err := os.ReadFile(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "token-one") || strings.Contains(string(raw), "zai-two") {
+		t.Fatal("backup leaked plaintext secrets")
 	}
 }
 

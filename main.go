@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"log"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -26,6 +31,11 @@ type Desktop struct {
 	service *app.Service
 	cancel  context.CancelFunc
 	done    chan struct{}
+}
+
+type APIResponse struct {
+	Status int    `json:"status"`
+	Body   string `json:"body"`
 }
 
 func (d *Desktop) startup(wailsCtx context.Context) {
@@ -52,6 +62,53 @@ func (d *Desktop) shutdown(_ context.Context) {
 
 func (d *Desktop) Port() int {
 	return d.service.Port()
+}
+
+func (d *Desktop) APIRequest(method, path, body string) (APIResponse, error) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.Contains(path, "://") {
+		return APIResponse{}, errors.New("caminho de API invalido")
+	}
+	var lastErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response, err := d.apiRequestOnce(method, path, body)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return APIResponse{}, lastErr
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func (d *Desktop) apiRequestOnce(method, path, body string) (APIResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	requestURL := "http://127.0.0.1:" + fmt.Sprint(d.service.Port()) + path
+	request, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewBufferString(body))
+	if err != nil {
+		return APIResponse{}, err
+	}
+	request.Header.Set("Accept", "application/json")
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return APIResponse{}, err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 25<<20))
+	if err != nil {
+		return APIResponse{}, err
+	}
+	return APIResponse{Status: response.StatusCode, Body: string(raw)}, nil
 }
 
 func (d *Desktop) OpenExternalURL(rawURL string) error {

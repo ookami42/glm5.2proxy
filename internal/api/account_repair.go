@@ -122,7 +122,7 @@ func (s *Server) repairOneAccount(ctx context.Context, account accounts.Account)
 	}
 
 	if strings.TrimSpace(account.ZAIAcccessToken) == "" {
-		return s.removeBrokenAccount(item, account.ID, "conta sem balances de Start Plan e sem ZAI access token salvo para reparo")
+		return s.keepBrokenAccount(item, "conta sem balances de Start Plan e sem ZAI access token salvo para reparo")
 	}
 	outcome, err := s.refreshCodingPlanForAccount(ctx, account)
 	if err != nil {
@@ -133,7 +133,7 @@ func (s *Server) repairOneAccount(ctx context.Context, account accounts.Account)
 			item.Reason = "erro temporario no reparo direto; nao removi a conta"
 			return item
 		}
-		return s.removeBrokenAccount(item, account.ID, "reparo direto falhou e a conta continuava sem cota: "+err.Error())
+		return s.keepBrokenAccount(item, "reparo direto falhou e a conta continuava sem cota: "+err.Error())
 	}
 	item.QuotaVerified = outcome.Result.QuotaVerified
 	item.StartPlanOK = outcome.Result.StartPlanVerified
@@ -149,7 +149,7 @@ func (s *Server) repairOneAccount(ctx context.Context, account accounts.Account)
 	if outcome.Result.StartPlanError != "" {
 		reason += ": " + outcome.Result.StartPlanError
 	}
-	return s.removeBrokenAccount(item, account.ID, reason)
+	return s.keepBrokenAccount(item, reason)
 }
 
 func (s *Server) refreshCodingPlanForAccount(ctx context.Context, account accounts.Account) (codingPlanRefreshOutcome, error) {
@@ -204,24 +204,10 @@ func hasQuotaBalances(snapshot quota.Snapshot) bool {
 	return len(snapshot.Balances) > 0
 }
 
-func (s *Server) removeBrokenAccount(item accountRepairItem, accountID, reason string) accountRepairItem {
-	removed, err := s.accounts.Remove(accountID)
-	if err != nil {
-		item.Action = "failed"
-		item.Error = err.Error()
-		s.logs.add("error", "account_repair.remove_failed", fmt.Sprintf("Falha ao remover %s: %s", item.Account.Label, err))
-		return item
-	}
-	if !removed {
-		item.Action = "failed"
-		item.Error = "account not found"
-		s.logs.add("error", "account_repair.remove_missing", fmt.Sprintf("Falha ao remover %s: conta nao encontrada", item.Account.Label))
-		return item
-	}
-	_ = s.admin.SetAccountThinking(accountID, nil)
-	item.Action = "removed"
+func (s *Server) keepBrokenAccount(item accountRepairItem, reason string) accountRepairItem {
+	item.Action = "skipped"
 	item.Reason = reason
-	s.logs.add("warn", "account_repair.account_removed", fmt.Sprintf("%s removida automaticamente: %s", item.Account.Label, reason))
+	s.logs.add("warn", "account_repair.account_preserved", fmt.Sprintf("%s mantida no pool; manutencao automatica nao remove contas. Motivo detectado: %s", item.Account.Label, reason))
 	return item
 }
 

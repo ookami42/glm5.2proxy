@@ -734,7 +734,7 @@ func TestAPIStateReorderAndLogs(t *testing.T) {
 	}
 }
 
-func TestAccountRepairRemovesBrokenAccountWithEmptyStartPlan(t *testing.T) {
+func TestAccountRepairPreservesBrokenAccountWithEmptyStartPlan(t *testing.T) {
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/billing/current":
@@ -771,11 +771,11 @@ func TestAccountRepairRemovesBrokenAccountWithEmptyStartPlan(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || int(report["removed"].(float64)) != 1 {
-		t.Fatalf("expected one removed account, status=%d report=%+v", response.StatusCode, report)
+	if response.StatusCode != http.StatusOK || int(report["skipped"].(float64)) != 1 || int(report["removed"].(float64)) != 0 {
+		t.Fatalf("expected one preserved account, status=%d report=%+v", response.StatusCode, report)
 	}
-	if accountStore.Get("broken") != nil {
-		t.Fatal("broken account should have been removed")
+	if accountStore.Get("broken") == nil {
+		t.Fatal("broken account should have been preserved")
 	}
 	logsResponse, _ := http.Get(httpServer.URL + "/api/admin/logs")
 	var logs map[string]any
@@ -784,12 +784,12 @@ func TestAccountRepairRemovesBrokenAccountWithEmptyStartPlan(t *testing.T) {
 	found := false
 	for _, raw := range logs["data"].([]any) {
 		entry := raw.(map[string]any)
-		if entry["event"] == "account_repair.account_removed" && strings.Contains(entry["message"].(string), "Start Plan") {
+		if entry["event"] == "account_repair.account_preserved" && strings.Contains(entry["message"].(string), "Start Plan") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected account repair removal log, got %+v", logs)
+		t.Fatalf("expected account repair preservation log, got %+v", logs)
 	}
 }
 

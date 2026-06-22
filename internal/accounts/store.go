@@ -250,14 +250,24 @@ func (s *Store) Reorder(ids []string) error {
 func (s *Store) Remove(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	found := false
+	for _, account := range s.data.Accounts {
+		if account.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	if err := s.backupLocked(); err != nil {
+		return false, err
+	}
 	filtered := s.data.Accounts[:0]
 	for _, account := range s.data.Accounts {
 		if account.ID != id {
 			filtered = append(filtered, account)
 		}
-	}
-	if len(filtered) == len(s.data.Accounts) {
-		return false, nil
 	}
 	s.data.Accounts = filtered
 	if s.data.ActiveAccountID == id {
@@ -267,6 +277,22 @@ func (s *Store) Remove(id string) (bool, error) {
 		}
 	}
 	return true, s.saveLocked()
+}
+
+func (s *Store) backupLocked() error {
+	raw, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(filepath.Dir(s.path), "backups")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	name := fmt.Sprintf("%s.%s.bak", filepath.Base(s.path), time.Now().UTC().Format("20060102T150405.000000000Z"))
+	return os.WriteFile(filepath.Join(dir, name), raw, 0o600)
 }
 
 func Sanitize(account Account) PublicAccount {

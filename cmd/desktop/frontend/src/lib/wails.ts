@@ -1,4 +1,3 @@
-import { OpenExternalURL } from '../../wailsjs/go/main/Desktop'
 import { BrowserOpenURL } from '../../wailsjs/runtime/runtime'
 
 export async function openExternalURL(url: string): Promise<void> {
@@ -14,8 +13,11 @@ export async function openExternalURL(url: string): Promise<void> {
   }
 
   try {
-    await OpenExternalURL(url)
-    return
+    const openExternal = window.go?.main?.Desktop?.OpenExternalURL
+    if (openExternal) {
+      await openExternal(url)
+      return
+    }
   } catch {
     // Browser preview does not expose Go bindings.
   }

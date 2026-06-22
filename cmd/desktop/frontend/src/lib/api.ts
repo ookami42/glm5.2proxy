@@ -1,11 +1,9 @@
-import { Port } from '../../wailsjs/go/main/Desktop'
-
 let cachedPort: number | null = null
 
 async function getPort(): Promise<number> {
   if (cachedPort == null) {
     try {
-      cachedPort = await Port()
+      cachedPort = (await window.go?.main?.Desktop?.Port?.()) ?? 3005
     } catch {
       cachedPort = 3005
     }
@@ -22,7 +20,52 @@ function isNetworkError(err: unknown): boolean {
   return err instanceof TypeError || (err instanceof Error && /failed to fetch|network/i.test(err.message))
 }
 
+function hasNativeAPIRequest(): boolean {
+  return typeof window !== 'undefined' && typeof window.go?.main?.Desktop?.APIRequest === 'function'
+}
+
+function abortError(): DOMException {
+  return new DOMException('The operation was aborted.', 'AbortError')
+}
+
+function parseJSON<T>(body: string): T {
+  return (body ? JSON.parse(body) : undefined) as T
+}
+
+async function nativeRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  if (init?.signal?.aborted) {
+    throw abortError()
+  }
+  const method = init?.method ?? 'GET'
+  const body = typeof init?.body === 'string' ? init.body : init?.body == null ? '' : String(init.body)
+  const request = window.go?.main?.Desktop?.APIRequest
+  if (!request) {
+    throw new Error('API nativa do desktop indisponivel')
+  }
+  const response = await request(method, path, body)
+  if (init?.signal?.aborted) {
+    throw abortError()
+  }
+  if (response.status < 200 || response.status >= 300) {
+    let message = `HTTP ${response.status}`
+    if (response.body) {
+      try {
+        const parsed = JSON.parse(response.body)
+        message = parsed?.error?.message ?? message
+      } catch {
+        message = response.body
+      }
+    }
+    throw new Error(message)
+  }
+  return parseJSON<T>(response.body)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  if (hasNativeAPIRequest()) {
+    return nativeRequest<T>(path, init)
+  }
+
   const bases = await getBaseURLs()
   let lastNetworkError: unknown = null
   for (const base of bases) {

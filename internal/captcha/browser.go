@@ -94,7 +94,7 @@ func (m *BrowserManager) loop(ctx context.Context) {
 		_ = os.MkdirAll(m.cfg.HeadlessProfileDir, 0o700)
 		clientName := m.launchClient()
 		url := fmt.Sprintf("http://127.0.0.1:%d/zcode/captcha/browser?client=%s", m.port, clientName)
-		args := []string{"--user-data-dir=" + m.cfg.HeadlessProfileDir, "--no-first-run", "--no-default-browser-check", "--disable-breakpad", "--disable-component-extensions-with-background-pages", "--disable-component-update", "--disable-default-apps", "--disable-extensions", "--disable-sync", "--disable-features=GlobalMediaControls,MediaRouter,OptimizationHints,Translate,msEdgeUpdateLaunchServicesPreferredVersion", "--metrics-recording-only", "--mute-audio", "--window-size=1100,900"}
+		args := []string{"--user-data-dir=" + m.cfg.HeadlessProfileDir, "--no-first-run", "--no-default-browser-check", "--no-proxy-server", "--disable-breakpad", "--disable-component-extensions-with-background-pages", "--disable-component-update", "--disable-default-apps", "--disable-extensions", "--disable-sync", "--disable-features=GlobalMediaControls,MediaRouter,OptimizationHints,Translate,msEdgeUpdateLaunchServicesPreferredVersion", "--metrics-recording-only", "--mute-audio", "--window-size=1100,900"}
 		if clientName == "headless-browser" {
 			args = append(args, "--headless=new")
 		}
