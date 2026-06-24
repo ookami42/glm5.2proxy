@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { useAuth } from '@/hooks/use-auth'
 
 interface LoginDialogProps {
@@ -10,72 +11,48 @@ interface LoginDialogProps {
 }
 
 export function LoginDialog({ open, onOpenChange, onSuccess }: LoginDialogProps) {
-  const { pending, error, startLogin, pollLogin, resetLogin } = useAuth()
-  const [flowId, setFlowId] = useState<string | null>(null)
-  const [pollIntervalMs, setPollIntervalMs] = useState(2000)
-  const [status, setStatus] = useState<string>('')
-  const pollingRef = useRef(false)
-
-  useEffect(() => {
-    if (!open) {
-      setFlowId(null)
-      setPollIntervalMs(2000)
-      setStatus('')
-      pollingRef.current = false
-      resetLogin()
-    }
-  }, [open, resetLogin])
-
-  useEffect(() => {
-    if (!flowId || !pending) return
-
-    const poll = async () => {
-      if (pollingRef.current) return
-      pollingRef.current = true
-      try {
-        const result = await pollLogin(flowId)
-        setStatus(result.status)
-        if (result.status === 'ready') {
-          resetLogin()
-          onSuccess()
-          onOpenChange(false)
-        }
-      } catch {
-        setStatus('failed')
-        // The hook exposes the error in the dialog.
-      } finally {
-        pollingRef.current = false
-      }
-    }
-
-    void poll()
-    const interval = setInterval(poll, pollIntervalMs)
-    return () => clearInterval(interval)
-  }, [flowId, pending, pollIntervalMs, pollLogin, resetLogin, onSuccess, onOpenChange])
+  const { pending, error, startLogin, exchangeCode, resetLogin } = useAuth()
+  const [flow, setFlow] = useState<{ flowId: string; state: string } | null>(null)
+  const [code, setCode] = useState('')
+  const [exchanging, setExchanging] = useState(false)
 
   const handleLogin = async () => {
     try {
-      const flow = await startLogin()
-      if (flow.flowId) {
-        setFlowId(flow.flowId)
-        setPollIntervalMs(Math.max(1000, (flow.pollIntervalSec || 2) * 1000))
-        setStatus('pending')
+      const f = await startLogin()
+      if (f.flowId) {
+        setFlow({ flowId: f.flowId, state: f.state })
       }
     } catch {
       // The hook exposes the error in the dialog.
     }
   }
 
+  const handleExchange = async () => {
+    if (!flow || !code.trim()) return
+    setExchanging(true)
+    try {
+      const result = await exchangeCode(flow.flowId, code.trim(), flow.state)
+      if (result.status === 'ready') {
+        resetLogin()
+        onSuccess()
+        onOpenChange(false)
+      }
+    } catch {
+      // The hook exposes the error in the dialog.
+    } finally {
+      setExchanging(false)
+    }
+  }
+
   const handleRetry = () => {
-    setFlowId(null)
-    setPollIntervalMs(2000)
-    setStatus('')
-    pollingRef.current = false
+    setFlow(null)
+    setCode('')
+    setExchanging(false)
     resetLogin()
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(open) => { if (!open) handleRetry(); onOpenChange(open) }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Adicionar Conta ZCode</DialogTitle>
@@ -85,7 +62,7 @@ export function LoginDialog({ open, onOpenChange, onSuccess }: LoginDialogProps)
         </DialogHeader>
 
         <div className="flex flex-col items-center gap-4 py-4">
-          {!flowId ? (
+          {!flow ? (
             <>
               <Button onClick={handleLogin} disabled={pending} className="w-full" size="lg">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24">
@@ -101,29 +78,30 @@ export function LoginDialog({ open, onOpenChange, onSuccess }: LoginDialogProps)
               </p>
             </>
           ) : (
-            <div className="flex flex-col items-center gap-3">
-              <div className={pending ? 'h-12 w-12 rounded-full border-4 border-muted border-t-foreground animate-spin' : 'h-12 w-12 rounded-full border-4 border-destructive'} />
-              <div className="text-center">
-                <p className="text-sm font-medium">{pending ? 'Aguardando autenticação...' : 'Login não concluído'}</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {error
-                    ? 'Reinicie o login e tente novamente'
-                    : status === 'pending' ? 'Complete o login no navegador' : status}
-                </p>
-              </div>
+            <div className="flex w-full flex-col items-center gap-3">
+              <p className="text-sm text-center">
+                Apos o login no navegador, copie o codigo da URL
+                <br />
+                <code className="text-xs bg-muted px-1 rounded">zcode://zai-auth/callback?code=COLE_AQUI</code>
+              </p>
+              <Input
+                placeholder="Cole o codigo de autorizacao aqui"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                disabled={exchanging}
+              />
+              <Button onClick={handleExchange} disabled={!code.trim() || exchanging} className="w-full">
+                {exchanging ? 'Autenticando...' : 'Confirmar Codigo'}
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={handleRetry}>
+                Reiniciar login
+              </Button>
             </div>
           )}
           {error && (
-            <div className="flex w-full flex-col items-center gap-3">
-              <p role="alert" className="text-sm text-destructive text-center">
-                {error}
-              </p>
-              {flowId && (
-                <Button type="button" variant="outline" size="sm" onClick={handleRetry}>
-                  Reiniciar login
-                </Button>
-              )}
-            </div>
+            <p role="alert" className="text-sm text-destructive text-center">
+              {error}
+            </p>
           )}
         </div>
       </DialogContent>

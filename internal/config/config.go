@@ -22,6 +22,11 @@ type Config struct {
 	ZAIUsageQuotaURL         string
 	OAuthBaseURL             string
 	OAuthProvider            string
+	OAuthAuthorizeURL        string
+	OAuthTokenURL            string
+	OAuthUserInfoURL         string
+	OAuthClientID            string
+	OAuthRedirectURI         string
 	AppVersion               string
 	Platform                 string
 	Authorization            string
@@ -84,6 +89,11 @@ func Load() Config {
 		ZAIUsageQuotaURL:         env("ZCODE_ZAI_USAGE_QUOTA_URL", "https://api.z.ai/api/monitor/usage/quota/limit"),
 		OAuthBaseURL:             env("ZCODE_OAUTH_BASE_URL", "https://zcode.z.ai/api/v1"),
 		OAuthProvider:            env("ZCODE_OAUTH_PROVIDER", "zai"),
+		OAuthAuthorizeURL:        env("ZCODE_OAUTH_AUTHORIZE_URL", "https://chat.z.ai/api/oauth/authorize"),
+		OAuthTokenURL:            env("ZCODE_OAUTH_TOKEN_URL", "https://zcode.z.ai/api/v1/oauth/token"),
+		OAuthUserInfoURL:         env("ZCODE_OAUTH_USERINFO_URL", "https://chat.z.ai/api/oauth/userinfo"),
+		OAuthClientID:            env("ZCODE_OAUTH_CLIENT_ID", "client_P8X5CMWmlaRO9gyO-KSqtg"),
+		OAuthRedirectURI:         env("ZCODE_OAUTH_REDIRECT_URI", "zcode://zai-auth/callback"),
 		AppVersion:               env("ZCODE_APP_VERSION", "3.1.2"),
 		Platform:                 env("ZCODE_PLATFORM", platform()),
 		Authorization:            os.Getenv("ZCODE_AUTHORIZATION"),
