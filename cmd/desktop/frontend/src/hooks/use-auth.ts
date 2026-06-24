@@ -5,7 +5,7 @@ import { openExternalURL } from '@/lib/wails'
 interface LoginFlow {
   flowId: string
   authorizeUrl: string
-  pollIntervalSec: number
+  state: string
   status: string
 }
 
@@ -47,15 +47,13 @@ export function useAuth() {
     }
   }, [])
 
-  const pollLogin = useCallback(async (flowId: string): Promise<PollResult> => {
+  const exchangeCode = useCallback(async (flowId: string, code: string, state: string): Promise<PollResult> => {
     try {
-      const result = await api.get<PollResult>(`/api/admin/auth/login/poll?flow_id=${flowId}`)
-      if (result.status === 'ready' || result.status === 'failed') {
-        setPending(false)
-      }
+      const result = await api.get<PollResult>(`/api/admin/auth/login/poll?flow_id=${flowId}&code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`)
+      setPending(false)
       return result
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Poll failed'
+      const msg = err instanceof Error ? err.message : 'Code exchange failed'
       setError(msg)
       setPending(false)
       throw err
@@ -67,5 +65,5 @@ export function useAuth() {
     setError(null)
   }, [])
 
-  return { pending, error, startLogin, pollLogin, resetLogin }
+  return { pending, error, startLogin, exchangeCode, resetLogin }
 }

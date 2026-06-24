@@ -873,19 +873,21 @@ func (s *Server) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "flow_id is required", "invalid_request_error")
 		return
 	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "pending", "flowId": flowID})
+		return
+	}
+	state := r.URL.Query().Get("state")
 	started := time.Now()
-	result, err := s.oauth.Poll(r.Context(), flowID)
+	result, err := s.oauth.Exchange(r.Context(), flowID, code, state)
 	elapsed := time.Since(started)
 	if err != nil {
-		s.logs.add("warn", "auth.poll_failed", fmt.Sprintf("Poll do flow %s falhou apos %s: %s", flowID, elapsed, err))
+		s.logs.add("warn", "auth.exchange_failed", fmt.Sprintf("Troca do codigo OAuth para flow %s falhou apos %s: %s", flowID, elapsed, err))
 		writeError(w, http.StatusBadGateway, err.Error(), "zcode_auth_flow_failed")
 		return
 	}
-	if result["status"] == "ready" {
-		s.logs.add("info", "auth.completed", fmt.Sprintf("Conta ZCode autenticada e adicionada à fila (flow %s concluido apos %s)", flowID, elapsed))
-	} else if elapsed > time.Second {
-		s.logs.add("warn", "auth.poll_slow", fmt.Sprintf("Poll do flow %s levou %s para retornar status=%v", flowID, elapsed, result["status"]))
-	}
+	s.logs.add("info", "auth.completed", fmt.Sprintf("Conta ZCode autenticada e adicionada a fila (flow %s concluido apos %s)", flowID, elapsed))
 	writeJSON(w, http.StatusOK, result)
 }
 
